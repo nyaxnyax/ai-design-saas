@@ -81,8 +81,7 @@ export async function POST(request: Request) {
         // 4. Hash the password
         const passwordHash = await bcrypt.hash(password, 10)
 
-        // 5. Create Supabase shadow user
-        const shadowEmail = `${phone}@phone.login`
+        // 5. Create Supabase shadow user (shadowEmail is already defined above)
         // Generate deterministic shadow password so we can recreate it during login
         const shadowPassword = generateShadowPassword(password, phone)
 
