@@ -232,8 +232,8 @@ function StudioContent() {
             setError(null)
             setIsGenerating(false)
 
-            // 退出登录 - 使用 { scope: 'all' } 确保清理所有 session
-            const { error } = await supabase.auth.signOut({ scope: 'all' })
+            // 退出登录 - 清理 session
+            const { error } = await supabase.auth.signOut()
 
             if (error) {
                 console.error('Logout error:', error)
