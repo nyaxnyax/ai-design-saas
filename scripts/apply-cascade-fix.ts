@@ -77,7 +77,8 @@ async function applyCascadeFix() {
 
             console.log(`✅ Step ${i + 1} completed`)
         } catch (err) {
-            console.error(`❌ Exception at step ${i + 1}:`, err.message)
+            const errorMessage = err instanceof Error ? err.message : String(err)
+            console.error(`❌ Exception at step ${i + 1}:`, errorMessage)
             return
         }
     }
