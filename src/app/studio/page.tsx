@@ -308,6 +308,14 @@ function StudioContent() {
             // Only upload image if not text-to-image mode
             if (!isTextToImage) {
                 console.log('Step 1: Preparing file upload...')
+
+                // Double-check selectedFile is not null
+                if (!selectedFile) {
+                    setError('请先上传一张图片！')
+                    setIsGenerating(false)
+                    return
+                }
+
                 const fileExt = selectedFile.name.split('.').pop()
                 const fileName = `${user?.id || 'dev'}/${Date.now()}.${fileExt}`
 
