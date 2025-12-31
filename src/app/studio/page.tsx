@@ -347,7 +347,9 @@ function StudioContent() {
             prompt: prompt?.length,
             hasFile: !!selectedFile,
             credits,
-            cost: calculateCreditCost(activeTool, generationSettings)
+            cost: calculateCreditCost(activeTool, generationSettings),
+            batchMode: generationSettings.batchMode,
+            batchSize: generationSettings.batchSize
         })
 
         if (!DEV_MODE && !user) {
@@ -375,6 +377,13 @@ function StudioContent() {
             return
         }
 
+        // Batch mode: generate multiple images in sequence
+        if (generationSettings.batchMode && generationSettings.batchSize && generationSettings.batchSize > 1) {
+            await handleBatchGenerate()
+            return
+        }
+
+        // Single image generation (original logic)
         setIsGenerating(true)
         setGeneratedImage(null)
         setError(null)
@@ -507,6 +516,107 @@ function StudioContent() {
             setGenerationStage('')
         } finally {
             setIsGenerating(false)
+        }
+    }
+
+    // Handle batch generation
+    const handleBatchGenerate = async () => {
+        const batchSize = generationSettings.batchSize || 1
+        const isTextToImage = activeTool === 'text-to-image'
+
+        setIsGenerating(true)
+        setError(null)
+
+        // Store batch results
+        const batchResults: Array<{ url: string; prompt: string; index: number }> = []
+
+        for (let i = 0; i < batchSize; i++) {
+            try {
+                setGenerationStage(`正在生成第 ${i + 1}/${batchSize} 张图片...`)
+                setGenerationProgress(Math.round(((i + 1) / batchSize) * 100))
+
+                // Prepare image URL for non-text-to-image
+                let imageUrl = ''
+                if (!isTextToImage && selectedFile) {
+                    const fileExt = selectedFile.name.split('.').pop()
+                    const fileName = `${user?.id || 'dev'}/batch-${Date.now()}-${i}.${fileExt}`
+                    const { error: uploadError } = await supabase.storage
+                        .from('user-uploads')
+                        .upload(fileName, selectedFile)
+
+                    if (uploadError) {
+                        throw new Error('图片上传失败: ' + uploadError.message)
+                    }
+
+                    const { data: { publicUrl } } = supabase.storage
+                        .from('user-uploads')
+                        .getPublicUrl(fileName)
+                    imageUrl = publicUrl
+                }
+
+                const { data: { session } } = await supabase.auth.getSession()
+                if (!session) throw new Error("请先登录")
+
+                // Call API with batchMode disabled (each image is counted separately)
+                const singleImageSettings = { ...generationSettings, batchMode: false, batchSize: 1 }
+
+                const response = await fetch('/api/generate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${session.access_token}`
+                    },
+                    body: JSON.stringify({
+                        prompt: prompt || '高质量专业产品摄影，柔和的灯光，8K分辨率',
+                        image_url: imageUrl,
+                        type: isTextToImage ? 'text-to-image' : activeTool,
+                        settings: singleImageSettings
+                    })
+                })
+
+                const data = await response.json()
+
+                if (!response.ok) {
+                    throw new Error(data.error || 'Generation failed')
+                }
+
+                if (data?.image_url) {
+                    batchResults.push({
+                        url: data.image_url,
+                        prompt: prompt || '批量生成',
+                        index: i + 1
+                    })
+
+                    // Add to history
+                    const newHistoryItem = {
+                        id: `gen-${Date.now()}-${i}`,
+                        url: data.image_url,
+                        prompt: `[${i + 1}/${batchSize}] ${prompt || (isTextToImage ? 'AI 生图' : '图片处理')}`,
+                        settings: generationSettings,
+                        timestamp: Date.now()
+                    }
+                    setHistory(prev => [newHistoryItem, ...prev])
+                }
+
+                // Update credits after each successful generation
+                const singleImageCost = calculateCreditCost(activeTool, singleImageSettings)
+                setCredits(prev => Math.max(0, prev - singleImageCost))
+
+            } catch (error: any) {
+                console.error(`Batch generation error at image ${i + 1}:`, error)
+                setError(`第 ${i + 1} 张图片生成失败：${error.message}`)
+            }
+        }
+
+        setIsGenerating(false)
+        setGenerationProgress(100)
+
+        if (batchResults.length > 0) {
+            // Show first image
+            setGeneratedImage(batchResults[0].url)
+            setGenerationStage(`批量生成完成！成功 ${batchResults.length}/${batchSize} 张`)
+        } else {
+            setGenerationStage('批量生成失败，请重试')
         }
     }
 
