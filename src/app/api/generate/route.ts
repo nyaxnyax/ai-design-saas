@@ -154,15 +154,26 @@ export async function POST(req: Request) {
         }
 
         // 3. Validate and process settings
+        // IMPORTANT: Always use 1K for actual generation to avoid timeout
+        // But charge credits based on user's selected resolution
+        const userSelectedResolution = settings?.resolution || '1K';
         let finalSettings: GenerationSettings = {
-            resolution: settings?.resolution || '1K',
+            resolution: '1K', // Always generate at 1K to avoid timeout
             aspectRatio: settings?.aspectRatio || '16:9',
             sceneType: settings?.sceneType,
             artStyle: settings?.artStyle,
         };
 
-        // 4. Calculate cost using the new calculator
-        let cost = calculateCreditCost(type, finalSettings);
+        // Create settings for cost calculation based on user's selection
+        let costSettings: GenerationSettings = {
+            resolution: userSelectedResolution,
+            aspectRatio: settings?.aspectRatio || '16:9',
+            sceneType: settings?.sceneType,
+            artStyle: settings?.artStyle,
+        };
+
+        // 4. Calculate cost using the user's selected resolution (not the actual 1K)
+        let cost = calculateCreditCost(type, costSettings);
 
         // 4. Check Credits & Daily Limit
         // Fetch user credit record
@@ -210,8 +221,25 @@ export async function POST(req: Request) {
             now.getUTCMonth() === lastResetDate.getUTCMonth() &&
             now.getUTCDate() === lastResetDate.getUTCDate();
 
+        // FIX: If not same day, reset dailyCount AND update database immediately
         if (!isSameDay) {
             dailyCount = 0; // Reset for today
+
+            // Update database to reset daily count and set new reset time
+            const { data: resetData } = await supabaseAdmin
+                .from('user_credits')
+                .update({
+                    daily_generations: 0,
+                    last_daily_reset: new Date().toISOString()
+                })
+                .eq('user_id', user.id)
+                .select()
+                .single();
+
+            if (resetData) {
+                // Verify the update worked
+                console.log(`[Generate] Reset daily count for user ${user.id}`);
+            }
         }
 
         let isFreeUsage = false;
