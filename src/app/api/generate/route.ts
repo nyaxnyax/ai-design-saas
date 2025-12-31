@@ -396,7 +396,8 @@ export async function POST(req: Request) {
                 generationConfig: {
                     responseModalities: ["TEXT", "IMAGE"],
                     imageConfig: {
-                        aspectRatio: finalSettings.aspectRatio
+                        aspectRatio: finalSettings.aspectRatio,
+                        imageSize: finalSettings.resolution
                     }
                 }
             };
