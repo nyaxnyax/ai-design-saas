@@ -281,6 +281,7 @@ function StudioContent() {
 
     const handleLogout = async () => {
         try {
+            // First clear local state
             setUser(null)
             setCredits(DEV_MODE ? 999999 : 0)
             setGeneratedImage(null)
@@ -289,21 +290,26 @@ function StudioContent() {
             setError(null)
             setIsGenerating(false)
 
+            // Sign out from Supabase
             const { error } = await supabase.auth.signOut()
 
             if (error) {
                 console.error('Logout error:', error)
             }
 
+            // Clear localStorage
             try {
                 localStorage.clear()
             } catch (e) {
                 console.warn('Failed to clear localStorage:', e)
             }
 
+            // Reload page AFTER signOut completes
             window.location.reload()
         } catch (error) {
             console.error('Logout error:', error)
+            // Still reload even if there's an error
+            window.location.reload()
         }
     }
 

@@ -205,10 +205,12 @@ export function UserMenu({ isOpen, onClose, onSelect, onLogout, user, credits }:
                 <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-white/10 bg-[#0a0a0f]">
                     <button
                         onClick={async () => {
+                            // Close menu first
+                            onClose()
+                            // Then execute logout (which will reload the page)
                             if (onLogout) {
                                 await onLogout()
                             }
-                            onClose()
                         }}
                         className="w-full p-3 rounded-xl border border-red-500/20 hover:border-red-500/40 hover:bg-red-500/10 transition-all group flex items-center justify-center gap-2 text-red-400 hover:text-red-300"
                     >
