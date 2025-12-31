@@ -47,10 +47,13 @@ export function calculateCreditCost(
     ? (STYLE_MULTIPLIERS[settings.artStyle] || 1.0)
     : 1.0;
 
-  // Calculate final cost (round to nearest integer)
-  const finalCost = Math.round(baseCost * resolutionMultiplier * styleMultiplier);
+  // Calculate single image cost (round to nearest integer)
+  const singleCost = Math.round(baseCost * resolutionMultiplier * styleMultiplier);
 
-  return finalCost;
+  // Apply batch size multiplier if batch mode is enabled
+  const batchSize = settings.batchMode && settings.batchSize ? settings.batchSize : 1;
+
+  return singleCost * batchSize;
 }
 
 /**

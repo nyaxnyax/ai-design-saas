@@ -1,7 +1,7 @@
 "use client"
 
 import { Resolution, AspectRatio, SceneType, ArtStyle, GenerationSettings } from '@/types/generation';
-import { Settings, Image as ImageIcon, Palette, Wand2 } from 'lucide-react';
+import { Settings, Image as ImageIcon, Palette, Wand2, Layers, Zap } from 'lucide-react';
 
 interface GenerationSettingsPanelProps {
     settings: GenerationSettings;
@@ -11,6 +11,7 @@ interface GenerationSettingsPanelProps {
 
 const RESOLUTIONS: Resolution[] = ['1K', '2K', '4K'];
 const ASPECT_RATIOS: AspectRatio[] = ['1:1', '16:9', '4:3', '3:4', '9:16'];
+const BATCH_SIZES = [1, 2, 4, 6, 8, 10];
 
 const SCENE_TYPES: { value: SceneType; label: string; icon: any }[] = [
     { value: 'product', label: '产品摄影', icon: ImageIcon },
@@ -51,8 +52,68 @@ export function GenerationSettingsPanel({
         updateSetting('artStyle', settings.artStyle === value ? undefined : value);
     };
 
+    const toggleBatchMode = () => {
+        updateSetting('batchMode', !settings.batchMode);
+        if (!settings.batchMode) {
+            updateSetting('batchSize', 1);
+        }
+    };
+
     return (
         <div className="space-y-5">
+            {/* Batch Mode Toggle */}
+            <div className={`p-4 rounded-xl border transition-all ${
+                settings.batchMode
+                    ? 'bg-gradient-to-r from-indigo-600/10 to-purple-600/10 border-indigo-500/30'
+                    : 'border-white/10 bg-white/5'
+            }`}>
+                <div className="flex items-center justify-between mb-3">
+                    <label className="text-sm font-medium text-slate-300 flex items-center gap-2">
+                        <Layers className="w-4 h-4" />
+                        批量生成模式
+                    </label>
+                    <button
+                        onClick={() => !disabled && toggleBatchMode()}
+                        disabled={disabled}
+                        className={`relative w-12 h-6 rounded-full transition-all ${
+                            disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                        } ${settings.batchMode ? 'bg-indigo-600' : 'bg-white/10'}`}
+                    >
+                        <div className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow-md transition-all ${
+                            settings.batchMode ? 'left-7' : 'left-1'
+                        }`} />
+                    </button>
+                </div>
+
+                {settings.batchMode && (
+                    <div className="space-y-3">
+                        <div className="flex items-center gap-2 text-xs text-slate-400">
+                            <Zap className="w-3.5 h-3.5" />
+                            <span>选择生成数量（最多10张）</span>
+                        </div>
+                        <div className="grid grid-cols-6 gap-1.5">
+                            {BATCH_SIZES.map((size) => (
+                                <button
+                                    key={size}
+                                    onClick={() => !disabled && updateSetting('batchSize', size)}
+                                    disabled={disabled}
+                                    className={`py-2 rounded-lg text-xs font-medium border transition-all ${
+                                        (settings.batchSize || 1) === size
+                                            ? 'bg-indigo-600 border-indigo-500 text-white'
+                                            : 'border-white/10 text-slate-400 hover:bg-white/5'
+                                    } ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                >
+                                    {size}张
+                                </button>
+                            ))}
+                        </div>
+                        <p className="text-xs text-slate-500 mt-2">
+                            批量生成将按顺序处理，每张图片独立生成
+                        </p>
+                    </div>
+                )}
+            </div>
+
             {/* Resolution Selector */}
             <div>
                 <label className="text-sm font-medium text-slate-300 mb-2 flex items-center gap-2">

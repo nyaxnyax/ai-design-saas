@@ -34,6 +34,8 @@ export interface GenerationSettings {
   aspectRatio: AspectRatio;
   sceneType?: SceneType;
   artStyle?: ArtStyle;
+  batchMode?: boolean;
+  batchSize?: number;
 }
 
 // Extended API request payload
