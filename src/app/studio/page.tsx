@@ -335,12 +335,23 @@ function StudioContent() {
     ]
 
     const handleGenerate = async () => {
+        console.log('[handleGenerate] Starting generation...', {
+            user: !!user,
+            activeTool,
+            prompt: prompt?.length,
+            hasFile: !!selectedFile,
+            credits,
+            cost: calculateCreditCost(activeTool, generationSettings)
+        })
+
         if (!DEV_MODE && !user) {
+            console.log('[handleGenerate] No user, showing auth modal')
             setShowAuthModal(true)
             return
         }
 
         const isTextToImage = activeTool === 'text-to-image'
+        console.log('[handleGenerate] isTextToImage:', isTextToImage)
 
         if (!isTextToImage && !selectedFile) {
             setError('请先上传一张图片！')
@@ -413,6 +424,12 @@ function StudioContent() {
             if (!session) throw new Error("请先登录");
 
             console.log(`Step 4: Calling Next.js API /api/generate with mode: ${isTextToImage ? 'text-to-image' : 'image-to-image'}`)
+            console.log('[API] Request payload:', {
+                prompt: prompt || '高质量专业产品摄影，柔和的灯光，8K分辨率',
+                image_url: imageUrl,
+                type: isTextToImage ? 'text-to-image' : activeTool,
+                settings: generationSettings
+            })
 
             const response = await fetch('/api/generate', {
                 method: 'POST',
@@ -427,6 +444,8 @@ function StudioContent() {
                     settings: generationSettings
                 })
             })
+
+            console.log('[API] Response status:', response.status, response.statusText)
 
             const data = await response.json()
 
