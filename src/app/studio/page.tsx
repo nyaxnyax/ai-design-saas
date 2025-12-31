@@ -115,21 +115,34 @@ function StudioContent() {
                         try {
                             // Get session for auth header
                             const { data: { session } } = await supabase.auth.getSession()
+
+                            // Add timeout to prevent hanging
+                            const controller = new AbortController()
+                            const timeoutId = setTimeout(() => controller.abort(), 5000) // 5 second timeout
+
                             const initResponse = await fetch('/api/auth/init-credits', {
                                 method: 'POST',
                                 headers: {
                                     'Content-Type': 'application/json',
                                     ...(session?.access_token ? { 'Authorization': `Bearer ${session.access_token}` } : {})
-                                }
+                                },
+                                signal: controller.signal
                             })
+
+                            clearTimeout(timeoutId)
+
                             if (initResponse.ok) {
                                 const { data } = await initResponse.json()
                                 if (mounted) setCredits(data?.balance ?? 15)
                             } else {
+                                console.warn('[Studio] Init-credits returned non-OK status:', initResponse.status)
                                 if (mounted) setCredits(15)
                             }
-                        } catch (e) {
+                        } catch (e: any) {
                             console.error('[Studio] Failed to initialize credits:', e)
+                            if (e.name === 'AbortError') {
+                                console.warn('[Studio] Init-credits request timed out, using default credits')
+                            }
                             if (mounted) setCredits(15)
                         }
                     }
@@ -172,21 +185,34 @@ function StudioContent() {
                     console.warn('[Studio] Auth state change - No credits found, initializing...')
                     try {
                         const token = session.access_token
+
+                        // Add timeout to prevent hanging
+                        const controller = new AbortController()
+                        const timeoutId = setTimeout(() => controller.abort(), 5000) // 5 second timeout
+
                         const initResponse = await fetch('/api/auth/init-credits', {
                             method: 'POST',
                             headers: {
                                 'Content-Type': 'application/json',
                                 'Authorization': `Bearer ${token}`
-                            }
+                            },
+                            signal: controller.signal
                         })
+
+                        clearTimeout(timeoutId)
+
                         if (initResponse.ok) {
                             const { data } = await initResponse.json()
                             setCredits(data?.balance ?? 15)
                         } else {
+                            console.warn('[Studio] Auth state change - Init-credits returned non-OK status:', initResponse.status)
                             setCredits(15)
                         }
-                    } catch (e) {
+                    } catch (e: any) {
                         console.error('[Studio] Failed to init credits on auth change:', e)
+                        if (e.name === 'AbortError') {
+                            console.warn('[Studio] Auth state change - Init-credits request timed out, using default credits')
+                        }
                         setCredits(15)
                     }
                 }
