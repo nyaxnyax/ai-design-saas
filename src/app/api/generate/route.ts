@@ -369,11 +369,28 @@ export async function POST(req: Request) {
                 });
             }
 
+            // Build enhanced prompt with resolution info
+            const resolutionPrompt = finalSettings.resolution === '4K'
+                ? ' Generate at maximum 4K resolution (3840x2160 or higher). Ultra high quality, maximum detail and clarity.'
+                : finalSettings.resolution === '2K'
+                ? ' Generate at 2K resolution (2560x1440). High resolution, enhanced details.'
+                : ' Generate at standard HD quality.';
+
+            const enhancedPrompt = userPrompt + resolutionPrompt;
+
             const payload = {
                 contents: [
                     {
                         role: "user",
-                        parts: parts
+                        parts: [
+                            { text: enhancedPrompt },
+                            ...(imageBase64 ? [{
+                                inline_data: {
+                                    mime_type: imageMimeType,
+                                    data: imageBase64
+                                }
+                            }] : [])
+                        ]
                     }
                 ],
                 generationConfig: {
@@ -385,6 +402,8 @@ export async function POST(req: Request) {
             };
 
             console.log(`[AI API] Calling ${modelName}... URL: ${googleUrl}`);
+            console.log(`[AI API] Resolution: ${finalSettings.resolution}, AspectRatio: ${finalSettings.aspectRatio}`);
+            console.log(`[AI API] Enhanced prompt length: ${enhancedPrompt.length}`);
 
             const response = await fetch(googleUrl, {
                 method: 'POST',
@@ -404,14 +423,33 @@ export async function POST(req: Request) {
             }
 
             const data = await response.json();
+
+            // Log response structure for debugging
+            console.log('[AI API] Response structure:', JSON.stringify({
+                hasCandidates: !!data.candidates,
+                candidatesLength: data.candidates?.length,
+                firstCandidateKeys: data.candidates?.[0] ? Object.keys(data.candidates[0]) : [],
+                hasContent: !!data.candidates?.[0]?.content,
+                contentKeys: data.candidates?.[0]?.content ? Object.keys(data.candidates[0].content) : [],
+                hasParts: !!data.candidates?.[0]?.content?.parts,
+                partsLength: data.candidates?.[0]?.content?.parts?.length,
+            }));
+
             // Parse Google Response (Inline Base64)
             // Structure: candidates[0].content.parts[].inlineData.data (Base64)
             const part = data.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData);
+
+            console.log('[AI API] Found inlineData part:', !!part);
 
             if (part && part.inlineData && part.inlineData.data) {
                 const base64Data = part.inlineData.data;
                 const mimeType = part.inlineData.mimeType || 'image/png';
                 outputUrl = `data:${mimeType};base64,${base64Data}`;
+                console.log('[AI API] Image extracted successfully, data URI length:', outputUrl.length);
+            } else {
+                // Try alternative response formats
+                console.log('[AI API] No inlineData found, checking alternatives...');
+                console.log('[AI API] Full response data:', JSON.stringify(data).substring(0, 500));
             }
 
         } else {
