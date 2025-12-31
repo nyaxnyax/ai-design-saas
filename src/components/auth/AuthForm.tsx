@@ -172,6 +172,11 @@ export function AuthForm({ onSuccess }: { onSuccess?: () => void }) {
                     throw new Error(data.error || '登录失败')
                 }
 
+                // Show message if auto-fixed
+                if (data.message) {
+                    setMessage(data.message)
+                }
+
                 // Hydrate Client Session
                 if (data.session) {
                     const { error: sessionError } = await supabase.auth.setSession(data.session)
