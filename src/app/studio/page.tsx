@@ -441,12 +441,13 @@ function StudioContent() {
                         {/* Main Canvas Area */}
                         <div className="flex-1 card border-2 border-dashed border-white/10 relative group overflow-hidden flex flex-col items-center justify-center bg-black/20">
                             {generatedImage ? (
-                                <div className="relative w-full h-full flex items-center justify-center p-4">
-                                    <div className="relative max-w-full max-h-full group">
+                                <div className="relative w-full h-full flex items-center justify-center p-4 overflow-auto">
+                                    <div className="relative group">
                                         <img
                                             src={generatedImage}
                                             alt="Generated"
-                                            className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
+                                            className="max-w-none max-h-full object-contain rounded-lg shadow-2xl"
+                                            style={{ maxHeight: 'calc(100vh - 250px)' }}
                                         />
                                         <div className="absolute top-4 right-4 flex gap-2 opacity-80 hover:opacity-100 transition-opacity">
                                             <button
