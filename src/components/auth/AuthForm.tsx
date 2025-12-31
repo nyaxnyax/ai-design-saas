@@ -2,7 +2,6 @@
 
 import { createClient } from '@/lib/supabase/client'
 import { useState, useEffect } from 'react'
-import { useRouter } from 'next/navigation'
 import { Lock, Loader2, Smartphone, MessageSquareCode, KeyRound, Gift } from 'lucide-react'
 
 // 手机号正则 (中国大陆)
@@ -31,7 +30,6 @@ export function AuthForm({ onSuccess }: { onSuccess?: () => void }) {
     const [errorCode, setErrorCode] = useState<string | null>(null)
 
     const supabase = createClient()
-    const router = useRouter()
 
     // Countdown Timer Effect
     useEffect(() => {
@@ -183,10 +181,9 @@ export function AuthForm({ onSuccess }: { onSuccess?: () => void }) {
                 if (data.session) {
                     const { error: sessionError } = await supabase.auth.setSession(data.session)
                     if (sessionError) throw sessionError
-
-                    // Refresh server state and close modal
-                    router.refresh()
-                    onSuccess?.()
+                    // Wait for auth state to propagate then reload
+                    await new Promise(resolve => setTimeout(resolve, 500))
+                    window.location.reload()
                 } else {
                     throw new Error('未获取到会话信息')
                 }
@@ -210,8 +207,8 @@ export function AuthForm({ onSuccess }: { onSuccess?: () => void }) {
                     type="button"
                     onClick={() => { setMode('login'); setError(null); setMessage(null); setErrorCode(null); }}
                     className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${mode === 'login'
-                        ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-lg'
-                        : 'text-slate-400 hover:text-white'
+                            ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-lg'
+                            : 'text-slate-400 hover:text-white'
                         }`}
                 >
                     登录
@@ -220,8 +217,8 @@ export function AuthForm({ onSuccess }: { onSuccess?: () => void }) {
                     type="button"
                     onClick={() => { setMode('register'); setError(null); setMessage(null); setErrorCode(null); }}
                     className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${mode === 'register'
-                        ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-lg'
-                        : 'text-slate-400 hover:text-white'
+                            ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-lg'
+                            : 'text-slate-400 hover:text-white'
                         }`}
                 >
                     注册

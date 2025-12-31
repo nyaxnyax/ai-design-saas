@@ -1,79 +1,9 @@
 import { NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
-import { calculateCreditCost } from '@/lib/credit-calculator';
+import { calculateCreditCost, BASE_COSTS } from '@/lib/credit-calculator';
 import type { GenerationSettings, SceneType, ArtStyle, Resolution } from '@/types/generation';
 
-// Switch to Node.js runtime for longer timeout support
-export const maxDuration = 300; // 300 seconds (5 mins) for 4K generation
-
-/**
- * Upload base64 image to Supabase Storage and return public URL
- * Includes retry logic and detailed error logging
- */
-async function uploadToStorage(supabase: any, base64Data: string, mimeType: string, userId: string): Promise<{ url: string | null; error: string | null }> {
-    const maxRetries = 2;
-    const uploadTimeout = 60000; // 60 seconds timeout
-
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        try {
-            const buffer = Buffer.from(base64Data, 'base64');
-            const ext = mimeType.split('/')[1] || 'png';
-            const filename = `${userId}/${Date.now()}-${Math.random().toString(36).substring(7)}.${ext}`;
-
-            console.log(`[Storage] Upload attempt ${attempt + 1}/${maxRetries + 1} - Size: ${buffer.length} bytes, File: ${filename}`);
-
-            // Create a timeout promise
-            const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error('Upload timeout')), uploadTimeout)
-            );
-
-            // Upload to 'user-uploads' bucket
-            const uploadPromise = supabase.storage
-                .from('user-uploads')
-                .upload(filename, buffer, {
-                    contentType: mimeType,
-                    upsert: false
-                });
-
-            // Race between upload and timeout
-            const { error: uploadError } = await Promise.race([
-                uploadPromise,
-                timeoutPromise.then(() => ({ error: { message: 'Upload timeout', name: 'TimeoutError' } }))
-            ]) as any;
-
-            if (uploadError) {
-                const errorMsg = `Attempt ${attempt + 1}: ${uploadError.message || JSON.stringify(uploadError)}`;
-                console.error(`[Storage] Upload failed - ${errorMsg}`);
-                if (attempt < maxRetries) {
-                    console.log(`[Storage] Retrying in 1 second...`);
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                    continue;
-                }
-                return { url: null, error: errorMsg };
-            }
-
-            const { data: { publicUrl } } = supabase.storage
-                .from('user-uploads')
-                .getPublicUrl(filename);
-
-            console.log(`[Storage] Upload success: ${publicUrl}`);
-            return { url: publicUrl, error: null };
-
-        } catch (e: any) {
-            const errorMsg = `Exception: ${e.message}`;
-            console.error(`[Storage] ${errorMsg}`);
-            if (attempt < maxRetries) {
-                console.log(`[Storage] Retrying in 1 second...`);
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                continue;
-            }
-            return { url: null, error: errorMsg };
-        }
-    }
-
-    return { url: null, error: 'Max retries exceeded' };
-}
-
+// EDGE RUNTIME may not support some Node APIs, but standard fetch/Supabase work fine.
 
 /**
  * Parse and translate API error messages to user-friendly Chinese messages
@@ -173,17 +103,24 @@ function translateErrorMessage(msg: string): string {
     return translated;
 }
 
+// EDGE RUNTIME may not support some Node APIs, but standard fetch/Supabase work fine.
+export const runtime = 'edge';
+
 // Initialize Supabase Admin Client
+// We use SERVICE_ROLE_KEY to perform backend operations (deduct credits) securely.
 const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
 
+const COST_STANDARD = 3
+const COST_PRO = 10
 const DAILY_FREE_LIMIT = 3
 
 export async function POST(req: Request) {
     try {
         // 1. Authenticate User
+        // We expect an Authorization header "Bearer <access_token>" from the client
         const authHeader = req.headers.get('Authorization');
         if (!authHeader) {
             return NextResponse.json({ error: 'Unauthorized: Missing Authorization header' }, { status: 401 });
@@ -200,11 +137,13 @@ export async function POST(req: Request) {
 
         // 2. Validate Inputs
         const apiKey = process.env.AI_API_KEY || process.env.OPENROUTER_API_KEY;
+        const baseUrl = process.env.AI_BASE_URL || 'https://openrouter.ai/api/v1';
 
         if (!apiKey) {
             return NextResponse.json({ error: 'System Error: Missing AI Config' }, { status: 500 });
         }
 
+        // Text-to-image mode doesn't require an image
         const isTextToImage = type === 'text-to-image';
         if (!isTextToImage && !image_url) {
             return NextResponse.json({ error: 'Image URL is required' }, { status: 400 });
@@ -214,7 +153,7 @@ export async function POST(req: Request) {
             return NextResponse.json({ error: 'Prompt is required' }, { status: 400 });
         }
 
-        // 3. Process settings
+        // 3. Validate and process settings
         let finalSettings: GenerationSettings = {
             resolution: settings?.resolution || '1K',
             aspectRatio: settings?.aspectRatio || '16:9',
@@ -222,21 +161,25 @@ export async function POST(req: Request) {
             artStyle: settings?.artStyle,
         };
 
-        // 4. Calculate cost
+        // 4. Calculate cost using the new calculator
         let cost = calculateCreditCost(type, finalSettings);
 
-        // 5. Check Credits & Daily Limit
+        // 4. Check Credits & Daily Limit
+        // Fetch user credit record
         const { data: creditRecord, error: creditFetchError } = await supabaseAdmin
             .from('user_credits')
             .select('*')
             .eq('user_id', user.id)
             .single();
 
-        if (creditFetchError && creditFetchError.code !== 'PGRST116') {
+        if (creditFetchError && creditFetchError.code !== 'PGRST116') { // PGRST116 = no rows
+            // If table missing or error, fail safe to deny or creating record? 
+            // Best to create if missing (though the Trigger should have done it)
             console.error('Fetch Credits Error:', creditFetchError);
             return NextResponse.json({ error: 'Failed to retrieve wallet info' }, { status: 500 });
         }
 
+        // If no record exists, create one (Fail-safe for old users created before migration)
         let currentCredits = 0;
         let dailyCount = 0;
         let lastReset = new Date(0).toISOString();
@@ -258,31 +201,39 @@ export async function POST(req: Request) {
             lastReset = creditRecord.last_daily_reset;
         }
 
+        // Check if daily reset is needed
+        // Convert both to same timezone day to compare. Simple UTC check:
         const now = new Date();
         const lastResetDate = new Date(lastReset);
+
         const isSameDay = now.getUTCFullYear() === lastResetDate.getUTCFullYear() &&
             now.getUTCMonth() === lastResetDate.getUTCMonth() &&
             now.getUTCDate() === lastResetDate.getUTCDate();
 
         if (!isSameDay) {
-            dailyCount = 0;
+            dailyCount = 0; // Reset for today
         }
 
         let isFreeUsage = false;
+
         if (dailyCount < DAILY_FREE_LIMIT) {
             isFreeUsage = true;
         } else {
+            // Check Balance
             if (currentCredits < cost) {
                 return NextResponse.json({ error: '积分不足 (Insufficient Credits)' }, { status: 402 });
             }
         }
 
-        // 6. Build Prompt
+        // 5. Build enhanced prompt based on type, scene, and style
         let userPrompt = buildEnhancedPrompt(prompt, type, finalSettings, isTextToImage);
 
         function buildEnhancedPrompt(basePrompt: string, toolType: string, settings: GenerationSettings, isTextToImage: boolean): string {
             let prompt = "";
+
+            // Build tool-specific base prompt
             if (isTextToImage) {
+                // Text-to-image mode: directly use the user's prompt
                 prompt = basePrompt || "Generate a high quality image";
             } else {
                 switch (toolType) {
@@ -293,13 +244,14 @@ export async function POST(req: Request) {
                         prompt = `Look at this image and generate an enhanced, higher resolution version. Make it sharper, more detailed, and improve the overall quality. ${basePrompt || ''}`;
                         break
                     case 'model':
-                        prompt = basePrompt || "Generate a professional fashion photo with a model wearing/holding this product.";
+                        prompt = basePrompt || "Generate a professional fashion photo with a model wearing/holding this product. High quality, 8K resolution, studio lighting, professional photography.";
                         break
                     default:
                         prompt = basePrompt || "Enhance this image";
                 }
             }
 
+            // Add scene type context
             if (settings.sceneType) {
                 const scenePrompts: Record<SceneType, string> = {
                     'product': 'Professional product photography, studio lighting, clean background.',
@@ -312,6 +264,7 @@ export async function POST(req: Request) {
                 prompt = `${scenePrompts[settings.sceneType]} ${prompt}`;
             }
 
+            // Add art style context
             if (settings.artStyle) {
                 const stylePrompts: Record<ArtStyle, string> = {
                     'realistic': 'Photorealistic style, ultra-detailed, lifelike rendering.',
@@ -325,7 +278,7 @@ export async function POST(req: Request) {
                 prompt = `${stylePrompts[settings.artStyle]} ${prompt}`;
             }
 
-            // Resolution hint in prompt
+            // Add resolution context to prompt
             const resolutionTexts: Record<Resolution, string> = {
                 '1K': 'Standard HD quality.',
                 '2K': 'High resolution 2K quality, enhanced details.',
@@ -338,191 +291,253 @@ export async function POST(req: Request) {
 
         console.log(`[Generate] User: ${user.id} | Type: ${type} | Free: ${isFreeUsage} | Credits: ${currentCredits}`);
 
-        // 7. Call AI API (Banana Pro / Google Native)
+        // 6. Call AI API
         let outputUrl = null;
+
+        // Detect correct internal logic based on provider
+        // Check for Google usage via URL, Key, or Model Name
         const modelName = process.env.AI_MODEL || "gemini-3-pro-image-preview";
 
-        // Use logic from reference code
-        const endpoint = process.env.AI_BASE_URL
-            ? `${process.env.AI_BASE_URL}/models/${modelName}:generateContent`
-            : `https://xingjiabiapi.org/v1beta/models/${modelName}:generateContent`;
+        // Use user's specific key and endpoint if model matches Banana Pro
+        const isBananaPro = modelName === "gemini-3-pro-image-preview";
+        const finalApiKey = isBananaPro && process.env.AI_API_KEY ? process.env.AI_API_KEY : apiKey;
+        const xingjiabiUrl = process.env.AI_BASE_URL
+            ? `${process.env.AI_BASE_URL}/models/gemini-3-pro-image-preview:generateContent`
+            : "https://xingjiabiapi.org/v1beta/models/gemini-3-pro-image-preview:generateContent";
 
-        // Final API Key
-        const finalApiKey = apiKey;
-        const apiUrl = `${endpoint}?key=${finalApiKey}`;
+        const isGoogle = isBananaPro || baseUrl.includes('googleapis') || apiKey.startsWith('AIza') || modelName.includes('gemini');
 
-        // Download image if needed
-        let imageBase64 = "";
-        let imageMimeType = "image/png";
+        if (isGoogle) {
+            // GOOGLE NATIVE / BANANA PRO IMPLEMENTATION
 
-        if (!isTextToImage && image_url) {
-            try {
-                console.log(`[AI API] Downloading image from: ${image_url}`);
-                const imageResponse = await fetch(image_url);
-                if (!imageResponse.ok) throw new Error(`Failed to download image: ${imageResponse.status}`);
-                const imageBuffer = await imageResponse.arrayBuffer();
-                const base64 = Buffer.from(imageBuffer).toString('base64');
-                imageBase64 = base64;
-
-                const urlLower = image_url.toLowerCase();
-                if (urlLower.includes('.jpg') || urlLower.includes('.jpeg')) imageMimeType = "image/jpeg";
-                else if (urlLower.includes('.webp')) imageMimeType = "image/webp";
-                else if (urlLower.includes('.gif')) imageMimeType = "image/gif";
-            } catch (e) {
-                console.error('[AI API] Failed to download image:', e);
-                return NextResponse.json({ error: 'Failed to process input image' }, { status: 500 });
+            let googleUrl = "";
+            if (isBananaPro) {
+                googleUrl = xingjiabiUrl;
+            } else {
+                // Construct URL: Use provided BaseURL if it's a proxy, otherwise default to Google
+                const targetBase = baseUrl.includes('openrouter.ai') ? 'https://generativelanguage.googleapis.com/v1beta' : baseUrl;
+                const cleanBase = targetBase.replace(/\/$/, '');
+                const endpoint = baseUrl.includes('googleapis') || baseUrl.includes('openrouter')
+                    ? `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`
+                    : `${cleanBase}/models/${modelName}:generateContent`;
+                googleUrl = `${endpoint}?key=${finalApiKey}`;
             }
-        }
 
-        // Construct Payload according to working sample
-        const parts: any[] = [{ text: userPrompt }];
-        if (imageBase64) {
-            parts.push({
-                inline_data: {
-                    mime_type: imageMimeType,
-                    data: imageBase64
-                }
-            });
-        }
+            // Download image and convert to base64 for Banana Pro/Gemini API
+            let imageBase64 = "";
+            let imageMimeType = "image/png";
 
-        const payload = {
-            contents: [{
-                role: 'user',
-                parts: parts
-            }],
-            generationConfig: {
-                responseModalities: ['TEXT', 'IMAGE'],
-                imageConfig: {
-                    aspectRatio: finalSettings.aspectRatio,
-                    imageSize: finalSettings.resolution
-                }
-            }
-        };
+            if (image_url) {
+                try {
+                    console.log(`[AI API] Downloading image from: ${image_url}`);
+                    const imageResponse = await fetch(image_url);
+                    if (!imageResponse.ok) {
+                        throw new Error(`Failed to download image: ${imageResponse.status}`);
+                    }
+                    const imageBuffer = await imageResponse.arrayBuffer();
+                    const base64 = Buffer.from(imageBuffer).toString('base64');
+                    imageBase64 = base64;
 
-        console.log(`[AI API] Calling ${endpoint}...`);
+                    // Detect mime type from URL
+                    const urlLower = image_url.toLowerCase();
+                    if (urlLower.includes('.jpg') || urlLower.includes('.jpeg')) {
+                        imageMimeType = "image/jpeg";
+                    } else if (urlLower.includes('.webp')) {
+                        imageMimeType = "image/webp";
+                    } else if (urlLower.includes('.gif')) {
+                        imageMimeType = "image/gif";
+                    }
 
-        const response = await fetch(apiUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                // Authorization header not strictly needed if key is in URL, but good practice if supported
-                // 'Authorization': `Bearer ${finalApiKey}` 
-            },
-            body: JSON.stringify(payload)
-        });
-
-        if (!response.ok) {
-            const errorText = await response.text();
-            console.error("AI API Error:", errorText);
-            const friendlyError = parseApiError(errorText);
-            return NextResponse.json({ error: friendlyError }, { status: response.status });
-        }
-
-        const data = await response.json();
-
-        // Extract result (Logic from reference)
-        // Check "candidates"
-        const candidate = data.candidates?.[0];
-        if (candidate) {
-            const contentParts = candidate.content?.parts || [];
-            // Look for inline_data
-            const inlinePart = contentParts.find((p: any) => p.inline_data || p.inlineData);
-            if (inlinePart) {
-                const inline = inlinePart.inline_data || inlinePart.inlineData;
-                if (inline?.data) {
-                    const mime = inline.mime_type || inline.mimeType || 'image/png';
-                    outputUrl = `data:${mime};base64,${inline.data}`;
+                    console.log(`[AI API] Image converted to base64, size: ${base64.length} chars, type: ${imageMimeType}`);
+                } catch (downloadError) {
+                    console.error('[AI API] Failed to download/convert image:', downloadError);
+                    return NextResponse.json({ error: 'Failed to process uploaded image' }, { status: 500 });
                 }
             }
-        }
 
-        // Fallback checks
-        if (!outputUrl && data.imageBase64) {
-            const mime = data.mimeType || 'image/png';
-            outputUrl = `data:${mime};base64,${data.imageBase64}`;
-        }
+            // Build parts array with text and image
+            const parts: any[] = [
+                { text: userPrompt }
+            ];
 
-        // Check if only text returned
-        if (!outputUrl) {
-            console.error("Model No Output Image. Full Response:", JSON.stringify(data).substring(0, 1000));
-            return NextResponse.json({ error: "Model returned text but no image. Please try again." }, { status: 500 });
-        }
+            if (imageBase64) {
+                parts.push({
+                    inline_data: {
+                        mime_type: imageMimeType,
+                        data: imageBase64
+                    }
+                });
+            }
 
-        // 8. PROCESS IMAGE: UPLOAD TO STORAGE
-        // Vercel has a 4.5MB body limit. 4K images are ~10-15MB.
-        // We MUST upload to storage and return a URL.
-        let finalImageUrl = outputUrl;
-        let storageError = null;
+            // Build enhanced prompt with resolution info
+            const resolutionPrompt = finalSettings.resolution === '4K'
+                ? ' Generate at maximum 4K resolution (3840x2160 or higher). Ultra high quality, maximum detail and clarity.'
+                : finalSettings.resolution === '2K'
+                ? ' Generate at 2K resolution (2560x1440). High resolution, enhanced details.'
+                : ' Generate at standard HD quality.';
 
-        // Check if it's base64
-        if (outputUrl.startsWith('data:')) {
-            const matches = outputUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
-            if (matches && matches.length === 3) {
-                const mimeType = matches[1];
-                const base64Data = matches[2];
-                const base64SizeMB = base64Data.length / (1024 * 1024);
+            const enhancedPrompt = userPrompt + resolutionPrompt;
 
-                console.log(`[Generate] Uploading result to storage (${base64Data.length} chars, ~${base64SizeMB.toFixed(2)}MB)...`);
-                const result = await uploadToStorage(supabaseAdmin, base64Data, mimeType, user.id);
-
-                if (result.url) {
-                    finalImageUrl = result.url;
-                    console.log(`[Generate] Upload success: ${finalImageUrl}`);
-                } else {
-                    // Storage upload failed - record error but don't fail the entire request
-                    storageError = result.error || 'Unknown storage error';
-                    console.error('[Generate] Storage upload failed:', storageError);
-
-                    // For small images (< 3MB base64), we can still return the base64 URL
-                    // For large images (4K), we need to let the frontend know about the storage issue
-                    if (base64Data.length > 3 * 1024 * 1024) {
-                        // Image is too large to return as base64 - mark as storage error
-                        console.warn('[Generate] Image too large for base64 fallback. Storage error will be sent to frontend.');
-                        finalImageUrl = null; // Signal that we don't have a usable URL
-                    } else {
-                        console.warn('[Generate] Using base64 fallback for smaller image.');
-                        // Keep the original base64 URL as fallback
-                        finalImageUrl = outputUrl;
+            const payload = {
+                contents: [
+                    {
+                        role: "user",
+                        parts: [
+                            { text: enhancedPrompt },
+                            ...(imageBase64 ? [{
+                                inline_data: {
+                                    mime_type: imageMimeType,
+                                    data: imageBase64
+                                }
+                            }] : [])
+                        ]
+                    }
+                ],
+                generationConfig: {
+                    responseModalities: ["TEXT", "IMAGE"],
+                    imageConfig: {
+                        aspectRatio: finalSettings.aspectRatio,
+                        imageSize: finalSettings.resolution
                     }
                 }
+            };
+
+            console.log(`[AI API] Calling ${modelName}... URL: ${googleUrl}`);
+            console.log(`[AI API] Resolution: ${finalSettings.resolution}, AspectRatio: ${finalSettings.aspectRatio}`);
+            console.log(`[AI API] Enhanced prompt length: ${enhancedPrompt.length}`);
+
+            const response = await fetch(googleUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${finalApiKey}`
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error("Google API Error:", errorText);
+                // Parse and translate error message for better UX
+                const friendlyError = parseApiError(errorText);
+                return NextResponse.json({ error: friendlyError }, { status: response.status });
+            }
+
+            const data = await response.json();
+
+            // Log response structure for debugging
+            console.log('[AI API] Response structure:', JSON.stringify({
+                hasCandidates: !!data.candidates,
+                candidatesLength: data.candidates?.length,
+                firstCandidateKeys: data.candidates?.[0] ? Object.keys(data.candidates[0]) : [],
+                hasContent: !!data.candidates?.[0]?.content,
+                contentKeys: data.candidates?.[0]?.content ? Object.keys(data.candidates[0].content) : [],
+                hasParts: !!data.candidates?.[0]?.content?.parts,
+                partsLength: data.candidates?.[0]?.content?.parts?.length,
+            }));
+
+            // Parse Google Response (Inline Base64)
+            // Structure: candidates[0].content.parts[].inlineData.data (Base64)
+            const part = data.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData);
+
+            console.log('[AI API] Found inlineData part:', !!part);
+
+            if (part && part.inlineData && part.inlineData.data) {
+                const base64Data = part.inlineData.data;
+                const mimeType = part.inlineData.mimeType || 'image/png';
+                outputUrl = `data:${mimeType};base64,${base64Data}`;
+                console.log('[AI API] Image extracted successfully, data URI length:', outputUrl.length);
+            } else {
+                // Try alternative response formats
+                console.log('[AI API] No inlineData found, checking alternatives...');
+                console.log('[AI API] Full response data:', JSON.stringify(data).substring(0, 500));
+            }
+
+        } else {
+            // OPENROUTER / OPENAI COMPATIBLE IMPLEMENTATION
+            const response = await fetch(`${baseUrl}/chat/completions`, {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${apiKey}`,
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://ai-design-saas.vercel.app",
+                    "X-Title": "AI Design SaaS"
+                },
+                body: JSON.stringify({
+                    model: process.env.AI_MODEL || "google/gemini-2.0-flash-exp:free", // Update default to a better model?
+                    messages: [
+                        {
+                            role: "user",
+                            content: [
+                                { type: "text", text: userPrompt },
+                                { type: "image_url", image_url: { url: image_url } }
+                            ]
+                        }
+                    ],
+                    max_tokens: 4096,
+                    temperature: 0.7
+                }),
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error("AI API Error:", errorText);
+                return NextResponse.json({ error: `AI API error: ${errorText}` }, { status: response.status });
+            }
+
+            const data = await response.json();
+            const message = data.choices?.[0]?.message;
+
+            if (message) {
+                // @ts-ignore
+                if (message.images && message.images.length > 0) {
+                    // @ts-ignore
+                    outputUrl = message.images[0].image_url?.url || message.images[0].imageUrl?.url;
+                }
+                if (!outputUrl && message.content) {
+                    const content = typeof message.content === 'string' ? message.content : JSON.stringify(message.content);
+                    const base64Match = content.match(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/);
+                    if (base64Match) outputUrl = base64Match[0];
+                    const urlMatch = content.match(/https?:\/\/[^\s"']+\.(png|jpg|jpeg|webp|gif)/i);
+                    if (!outputUrl && urlMatch) outputUrl = urlMatch[0];
+                }
             }
         }
 
-        // 9. Deduct Credits
+        if (!outputUrl) {
+            console.error("Model No Output. Data:", isGoogle ? "Google Parsed Failed" : "OpenAI Parsed Failed");
+            return NextResponse.json({ error: "Model did not return an image." }, { status: 500 });
+        }
+
+        // 7. Deduct Credits / Update Daily Count ON SUCCESS
+        // We do this AFTER generation to prevent taking credits for failures
         if (isFreeUsage) {
+            // Increment daily count, update reset time to NOW (to mark today as active)
             await supabaseAdmin.from('user_credits').update({
                 daily_generations: dailyCount + 1,
                 last_daily_reset: new Date().toISOString()
             }).eq('user_id', user.id);
-        } else {
-            await supabaseAdmin.from('user_credits').update({
-                balance: currentCredits - cost
-            }).eq('user_id', user.id);
-            currentCredits -= cost; // Update local var for stats
-        }
 
-        // 10. Return response with storage error info if applicable
-        // If storage failed but image was generated, return success with storage_error flag
-        if (storageError && !finalImageUrl) {
-            return NextResponse.json({
-                image_url: null,
-                storage_error: true,
-                error_message: `图片已生成但存储上传失败: ${storageError}`,
-                remaining_credits: currentCredits,
-                daily_used: isFreeUsage ? dailyCount + 1 : dailyCount
-            });
+            // Return updated status (frontend can refresh)
+            currentCredits = currentCredits; // No change
+        } else {
+            // Deduct Balance
+            const { data: updated } = await supabaseAdmin.from('user_credits').update({
+                balance: currentCredits - cost
+            }).eq('user_id', user.id).select().single();
+
+            currentCredits = updated?.balance ?? (currentCredits - cost);
         }
 
         return NextResponse.json({
-            image_url: finalImageUrl,
-            storage_error: !!storageError, // Flag if there was a storage error (but we have a fallback URL)
+            image_url: outputUrl,
             remaining_credits: currentCredits,
             daily_used: isFreeUsage ? dailyCount + 1 : dailyCount
         });
 
     } catch (error: any) {
-        console.error('Generaton Route Error:', error);
-        return NextResponse.json({ error: error.message || 'Server Error' }, { status: 500 });
+        console.error(error);
+        return NextResponse.json({ error: error.message || 'Internal Server Error' }, { status: 500 });
     }
 }
 

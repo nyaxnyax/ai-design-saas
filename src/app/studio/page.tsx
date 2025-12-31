@@ -378,8 +378,14 @@ function StudioContent() {
         try {
             let imageUrl = ''
 
-            // Check if we should use async mode (for 2K and 4K)
-            const useAsyncMode = generationSettings.resolution === '2K' || generationSettings.resolution === '4K'
+            // Simulate progress
+            for (const stage of progressStages) {
+                setGenerationStage(stage.text)
+                setGenerationProgress(stage.progress)
+                await new Promise(resolve => setTimeout(resolve, 800))
+            }
+            setGenerationStage('正在生成最终图片...')
+            setGenerationProgress(99)
 
             if (!isTextToImage) {
                 console.log('Step 1: Preparing file upload...')
@@ -417,196 +423,74 @@ function StudioContent() {
             const { data: { session } } = await supabase.auth.getSession();
             if (!session) throw new Error("请先登录");
 
-            // For 2K/4K, use async mode
-            if (useAsyncMode) {
-                console.log(`[Async Mode] Creating task for ${generationSettings.resolution} image...`)
+            console.log(`Step 4: Calling Next.js API /api/generate with mode: ${isTextToImage ? 'text-to-image' : 'image-to-image'}`)
+            console.log('[API] Request payload:', {
+                prompt: prompt || '高质量专业产品摄影，柔和的灯光，8K分辨率',
+                image_url: imageUrl,
+                type: isTextToImage ? 'text-to-image' : activeTool,
+                settings: generationSettings
+            })
 
-                setGenerationStage('正在加入生成队列...')
-                setGenerationProgress(10)
-
-                const asyncResponse = await fetch('/api/generate-async', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${session.access_token}`
-                    },
-                    body: JSON.stringify({
-                        prompt: prompt || '高质量专业产品摄影，柔和的灯光，8K分辨率',
-                        image_url: imageUrl,
-                        type: isTextToImage ? 'text-to-image' : activeTool,
-                        settings: generationSettings
-                    })
-                })
-
-                const asyncData = await asyncResponse.json()
-
-                if (!asyncResponse.ok) {
-                    throw new Error(asyncData.error || 'Failed to create task')
-                }
-
-                console.log('[Async Mode] Task created:', asyncData)
-
-                // Start polling for task status
-                setGenerationStage(asyncData.message || '任务已创建，正在处理中...')
-                setGenerationProgress(20)
-
-                const pollResult = await pollTaskStatus(asyncData.task_id)
-
-                if (pollResult.result_url) {
-                    setGeneratedImage(pollResult.result_url)
-                    setGenerationProgress(100)
-                    setGenerationStage('生成完成！')
-
-                    // Add to history
-                    const newHistoryItem = {
-                        id: `gen-${Date.now()}`,
-                        url: pollResult.result_url,
-                        prompt: prompt || (isTextToImage ? 'AI 生图' : '图片处理'),
-                        settings: generationSettings,
-                        timestamp: Date.now()
-                    }
-                    setHistory(prev => [newHistoryItem, ...prev])
-
-                    // Save to database
-                    try {
-                        await supabase.from('generations').insert({
-                            user_id: user?.id,
-                            prompt: prompt || (isTextToImage ? 'AI 生图' : '图片处理'),
-                            result_url: pollResult.result_url,
-                            settings: generationSettings,
-                            type: activeTool
-                        })
-                    } catch (e) {
-                        console.error('Failed to save history:', e)
-                    }
-
-                    setTimeout(() => {
-                        setGenerationProgress(0)
-                        setGenerationStage('')
-                    }, 2000)
-                } else if (pollResult.error) {
-                    throw new Error(pollResult.error)
-                } else {
-                    throw new Error('生成失败，请重试')
-                }
-            } else {
-                // Original sync mode for 1K
-                console.log(`[Sync Mode] Calling /api/generate for ${generationSettings.resolution} image...`)
-
-                // Simulate progress
-                for (const stage of progressStages) {
-                    setGenerationStage(stage.text)
-                    setGenerationProgress(stage.progress)
-                    await new Promise(resolve => setTimeout(resolve, 800))
-                }
-                setGenerationStage('正在生成最终图片...')
-                setGenerationProgress(99)
-
-                console.log('[API] Request payload:', {
+            const response = await fetch('/api/generate', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${session.access_token}`
+                },
+                body: JSON.stringify({
                     prompt: prompt || '高质量专业产品摄影，柔和的灯光，8K分辨率',
                     image_url: imageUrl,
                     type: isTextToImage ? 'text-to-image' : activeTool,
                     settings: generationSettings
                 })
+            })
 
-                const response = await fetch('/api/generate', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${session.access_token}`
-                    },
-                    body: JSON.stringify({
-                        prompt: prompt || '高质量专业产品摄影，柔和的灯光，8K分辨率',
-                        image_url: imageUrl,
-                        type: isTextToImage ? 'text-to-image' : activeTool,
-                        settings: generationSettings
-                    })
-                })
+            console.log('[API] Response status:', response.status, response.statusText)
 
-                console.log('[API] Response status:', response.status, response.statusText)
+            const data = await response.json()
 
-                const data = await response.json()
+            console.log('Step 5: API response:', data)
 
-                console.log('Step 5: API response:', data)
+            if (!response.ok) {
+                throw new Error(data.error || 'Generation failed')
+            }
 
-                if (!response.ok) {
-                    throw new Error(data.error || 'Generation failed')
+            if (data?.image_url) {
+                setGeneratedImage(data.image_url)
+                setCredits(data.remaining_credits ?? credits - 1)
+                setGenerationProgress(100)
+                setGenerationStage('生成完成！')
+
+                // Add to history
+                const newHistoryItem = {
+                    id: `gen-${Date.now()}`,
+                    url: data.image_url,
+                    prompt: prompt || (isTextToImage ? 'AI 生图' : '图片处理'),
+                    settings: generationSettings,
+                    timestamp: Date.now()
                 }
+                setHistory(prev => [newHistoryItem, ...prev])
 
-                // Check for storage error (image generated but upload failed)
-                if (data?.storage_error) {
-                    setCredits(data.remaining_credits ?? credits - 1)
-                    setGenerationProgress(100)
-                    setGenerationStage('生成完成！')
-
-                    if (data.error_message) {
-                        setError(data.error_message)
-                    } else if (data?.image_url) {
-                        setGeneratedImage(data.image_url)
-
-                        const newHistoryItem = {
-                            id: `gen-${Date.now()}`,
-                            url: data.image_url,
-                            prompt: prompt || (isTextToImage ? 'AI 生图' : '图片处理'),
-                            settings: generationSettings,
-                            timestamp: Date.now()
-                        }
-                        setHistory(prev => [newHistoryItem, ...prev])
-
-                        try {
-                            await supabase.from('generations').insert({
-                                user_id: user?.id,
-                                prompt: prompt || (isTextToImage ? 'AI 生图' : '图片处理'),
-                                result_url: data.image_url,
-                                settings: generationSettings,
-                                type: activeTool
-                            })
-                        } catch (e) {
-                            console.error('Failed to save history:', e)
-                        }
-
-                        setError('图片已生成（存储上传可能有问题，请尽快下载保存）')
-                    }
-
-                    setTimeout(() => {
-                        setGenerationProgress(0)
-                        setGenerationStage('')
-                        setError(null)
-                    }, 5000)
-                } else if (data?.image_url) {
-                    setGeneratedImage(data.image_url)
-                    setCredits(data.remaining_credits ?? credits - 1)
-                    setGenerationProgress(100)
-                    setGenerationStage('生成完成！')
-
-                    const newHistoryItem = {
-                        id: `gen-${Date.now()}`,
-                        url: data.image_url,
+                // Save to database
+                try {
+                    await supabase.from('generations').insert({
+                        user_id: user?.id,
                         prompt: prompt || (isTextToImage ? 'AI 生图' : '图片处理'),
+                        result_url: data.image_url,
                         settings: generationSettings,
-                        timestamp: Date.now()
-                    }
-                    setHistory(prev => [newHistoryItem, ...prev])
-
-                    try {
-                        await supabase.from('generations').insert({
-                            user_id: user?.id,
-                            prompt: prompt || (isTextToImage ? 'AI 生图' : '图片处理'),
-                            result_url: data.image_url,
-                            settings: generationSettings,
-                            type: activeTool
-                        })
-                    } catch (e) {
-                        console.error('Failed to save history:', e)
-                    }
-
-                    setTimeout(() => {
-                        setGenerationProgress(0)
-                        setGenerationStage('')
-                    }, 2000)
-                } else {
-                    throw new Error("未返回图片 URL")
+                        type: activeTool
+                    })
+                } catch (e) {
+                    console.error('Failed to save history:', e)
                 }
+
+                // Reset progress after a short delay
+                setTimeout(() => {
+                    setGenerationProgress(0)
+                    setGenerationStage('')
+                }, 2000)
+            } else {
+                throw new Error("未返回图片 URL")
             }
 
         } catch (err: unknown) {
@@ -618,48 +502,6 @@ function StudioContent() {
         } finally {
             setIsGenerating(false)
         }
-    }
-
-    // Poll task status for async generation
-    const pollTaskStatus = async (taskId: string): Promise<{ result_url?: string; error?: string }> => {
-        const maxAttempts = 60 // 60 attempts * 5 seconds = 5 minutes max
-        const pollInterval = 5000 // 5 seconds
-
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            try {
-                const response = await fetch(`/api/check-status?task_id=${taskId}`)
-                const data = await response.json()
-
-                console.log(`[Poll] Attempt ${attempt + 1}/${maxAttempts}:`, data)
-
-                if (data.status === 'completed' && data.result_url) {
-                    return { result_url: data.result_url }
-                }
-
-                if (data.status === 'failed') {
-                    return { error: data.error || '生成失败' }
-                }
-
-                // Update progress based on status
-                if (data.status === 'processing') {
-                    const progress = Math.min(20 + (attempt / maxAttempts) * 70, 90)
-                    setGenerationProgress(progress)
-                    setGenerationStage(`AI 正在处理... (${Math.round(progress)}%)`)
-                }
-
-                // Wait before next poll
-                if (attempt < maxAttempts - 1) {
-                    await new Promise(resolve => setTimeout(resolve, pollInterval))
-                }
-            } catch (e) {
-                console.error('[Poll] Error checking status:', e)
-                if (attempt === maxAttempts - 1) {
-                    return { error: '检查状态失败，请稍后手动刷新查看结果' }
-                }
-            }
-        }
-
-        return { error: '生成超时，请稍后查看历史记录' }
     }
 
     const handleDownload = async () => {

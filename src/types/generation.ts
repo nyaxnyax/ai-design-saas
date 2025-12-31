@@ -50,37 +50,3 @@ export interface CreditCostConfig {
   resolutionMultiplier: Record<Resolution, number>;
   styleMultiplier: number;
 }
-
-// Task status for async generation
-export type TaskStatus = 'pending' | 'processing' | 'completed' | 'failed';
-
-// Generation task for async processing
-export interface GenerationTask {
-  id: string;
-  user_id: string;
-  prompt: string;
-  image_url?: string;
-  type: string;
-  settings: GenerationSettings;
-  status: TaskStatus;
-  result_url?: string;
-  error?: string;
-  created_at: string;
-  updated_at: string;
-}
-
-// API response for async task creation
-export interface AsyncGenerateResponse {
-  task_id: string;
-  status: TaskStatus;
-  message: string;
-}
-
-// API response for status check
-export interface TaskStatusResponse {
-  task_id: string;
-  status: TaskStatus;
-  result_url?: string;
-  error?: string;
-  progress?: number;
-}
