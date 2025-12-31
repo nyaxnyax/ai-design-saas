@@ -6,7 +6,7 @@ import { useSearchParams, useRouter } from 'next/navigation'
 import { ToolSidebar } from '@/components/studio/ToolSidebar'
 import { GenerationSettingsPanel } from '@/components/studio/GenerationSettings'
 import { createClient } from '@/lib/supabase/client'
-import { Upload, X, Image as ImageIcon, Download, LogIn, Zap, Sparkles, Settings, ArrowRight, Wand2, Scissors, Eraser, ScanFace, Menu } from 'lucide-react'
+import { Upload, X, Image as ImageIcon, Download, LogIn, Zap, Sparkles, Settings, ArrowRight, Wand2, Scissors, Eraser, ScanFace, Menu, ChevronDown } from 'lucide-react'
 import Image from 'next/image'
 import { AuthModal } from '@/components/auth/AuthModal'
 import { UserMenu } from '@/components/studio/UserMenu'
@@ -42,18 +42,22 @@ function StudioContent() {
     const searchParams = useSearchParams()
     const mode = (searchParams.get('mode') as 'tools' | 'ecommerce') || 'ecommerce'
 
-    const [activeTool, setActiveTool] = useState<ToolType>(mode === 'tools' ? 'enhance' : 'background')
-    // Aligning state naming with new UI
+    const [activeTool, setActiveTool] = useState<ToolType>(mode === 'tools' ? 'enhance' : 'text-to-image')
     const [selectedFile, setSelectedFile] = useState<File | null>(null)
-    const [previewUrl, setPreviewUrl] = useState<string | null>(null) // Used to be selectedImage
+    const [previewUrl, setPreviewUrl] = useState<string | null>(null)
     const [generatedImage, setGeneratedImage] = useState<string | null>(null)
-    const [prompt, setPrompt] = useState('') // NEW: Prompt state
+    const [prompt, setPrompt] = useState('')
     const [generationSettings, setGenerationSettings] = useState<GenerationSettings>({
         resolution: '1K',
-        aspectRatio: '16:9',
+        aspectRatio: '1:1',
         sceneType: undefined,
         artStyle: undefined,
     })
+    const [generationProgress, setGenerationProgress] = useState(0)
+    const [generationStage, setGenerationStage] = useState('')
+
+    // History
+    const [history, setHistory] = useState<Array<{ id: string; url: string; prompt: string; settings: GenerationSettings; timestamp: number }>>([])
 
     const [isGenerating, setIsGenerating] = useState(false)
     const [error, setError] = useState<string | null>(null)
@@ -107,8 +111,6 @@ function StudioContent() {
                         setCredits(creditsData.balance)
                         console.log('[Studio] Credits loaded:', creditsData.balance)
                     } else if (mounted) {
-                        // No credits record found, this might be a new user
-                        // Try to initialize credits via API
                         console.warn('[Studio] No credits record found, initializing...')
                         try {
                             const initResponse = await fetch('/api/auth/init-credits', {
@@ -121,7 +123,6 @@ function StudioContent() {
                                 const { data } = await initResponse.json()
                                 if (mounted) setCredits(data?.balance ?? 15)
                             } else {
-                                // Fallback: set default 15 credits for display
                                 if (mounted) setCredits(15)
                             }
                         } catch (e) {
@@ -129,17 +130,20 @@ function StudioContent() {
                             if (mounted) setCredits(15)
                         }
                     }
+
+                    // Load history
+                    if (mounted) {
+                        loadHistory(user.id)
+                    }
                 }
             } catch (error) {
                 console.error('Error checking user:', error)
             } finally {
-                // Always set loading to false after checking user
                 if (mounted) setIsLoading(false)
             }
         }
         checkUser()
 
-        // Fallback: Ensure loading is set to false after 5 seconds max
         const fallbackTimer = setTimeout(() => {
             if (mounted) setIsLoading(false)
         }, 5000)
@@ -162,7 +166,6 @@ function StudioContent() {
                     setCredits(creditsData.balance)
                     console.log('[Studio] Auth state change - Credits loaded:', creditsData.balance)
                 } else {
-                    // No credits record, initialize it
                     console.warn('[Studio] Auth state change - No credits found, initializing...')
                     try {
                         const token = session.access_token
@@ -184,8 +187,10 @@ function StudioContent() {
                         setCredits(15)
                     }
                 }
+
+                // Load history
+                loadHistory(session.user.id)
             } else {
-                // User logged out
                 setCredits(DEV_MODE ? 999999 : 0)
             }
         })
@@ -196,6 +201,30 @@ function StudioContent() {
             subscription.unsubscribe()
         }
     }, [])
+
+    // Load generation history
+    const loadHistory = async (userId: string) => {
+        try {
+            const { data: historyData } = await supabase
+                .from('generations')
+                .select('*')
+                .eq('user_id', userId)
+                .order('created_at', { ascending: false })
+                .limit(20)
+
+            if (historyData) {
+                setHistory(historyData.map((item: any) => ({
+                    id: item.id,
+                    url: item.result_url,
+                    prompt: item.prompt,
+                    settings: item.settings,
+                    timestamp: new Date(item.created_at).getTime()
+                })))
+            }
+        } catch (e) {
+            console.error('Failed to load history:', e)
+        }
+    }
 
     // Handle menu item selection
     const handleMenuSelect = (itemId: string) => {
@@ -223,7 +252,6 @@ function StudioContent() {
 
     const handleLogout = async () => {
         try {
-            // 清理所有状态
             setUser(null)
             setCredits(DEV_MODE ? 999999 : 0)
             setGeneratedImage(null)
@@ -232,28 +260,24 @@ function StudioContent() {
             setError(null)
             setIsGenerating(false)
 
-            // 退出登录 - 清理 session
             const { error } = await supabase.auth.signOut()
 
             if (error) {
                 console.error('Logout error:', error)
             }
 
-            // 清理 localStorage 中的 Supabase 残留数据
             try {
                 localStorage.clear()
             } catch (e) {
                 console.warn('Failed to clear localStorage:', e)
             }
 
-            // 刷新页面
             window.location.reload()
         } catch (error) {
             console.error('Logout error:', error)
         }
     }
 
-    // Helper for Tool Selection
     const handleToolSelect = (toolId: string) => {
         setActiveTool(toolId as ToolType)
     }
@@ -273,13 +297,20 @@ function StudioContent() {
         reader.readAsDataURL(file)
     }
 
+    // Simulate progress stages
+    const progressStages = [
+        { text: '正在分析提示词...', progress: 20 },
+        { text: 'AI 正在创作...', progress: 50 },
+        { text: '正在优化细节...', progress: 75 },
+        { text: '即将完成...', progress: 95 },
+    ]
+
     const handleGenerate = async () => {
         if (!DEV_MODE && !user) {
             setShowAuthModal(true)
             return
         }
 
-        // Check if text-to-image mode (no image required)
         const isTextToImage = activeTool === 'text-to-image'
 
         if (!isTextToImage && !selectedFile) {
@@ -301,15 +332,24 @@ function StudioContent() {
         setIsGenerating(true)
         setGeneratedImage(null)
         setError(null)
+        setGenerationProgress(0)
+        setGenerationStage('')
 
         try {
             let imageUrl = ''
 
-            // Only upload image if not text-to-image mode
+            // Simulate progress
+            for (const stage of progressStages) {
+                setGenerationStage(stage.text)
+                setGenerationProgress(stage.progress)
+                await new Promise(resolve => setTimeout(resolve, 800))
+            }
+            setGenerationStage('正在生成最终图片...')
+            setGenerationProgress(99)
+
             if (!isTextToImage) {
                 console.log('Step 1: Preparing file upload...')
 
-                // Double-check selectedFile is not null
                 if (!selectedFile) {
                     setError('请先上传一张图片！')
                     setIsGenerating(false)
@@ -340,7 +380,6 @@ function StudioContent() {
                 console.log('Text-to-image mode: skipping image upload')
             }
 
-            // Get fresh session for token
             const { data: { session } } = await supabase.auth.getSession();
             if (!session) throw new Error("请先登录");
 
@@ -354,7 +393,7 @@ function StudioContent() {
                 },
                 body: JSON.stringify({
                     prompt: prompt || '高质量专业产品摄影，柔和的灯光，8K分辨率',
-                    image_url: imageUrl,  // Empty string for text-to-image
+                    image_url: imageUrl,
                     type: isTextToImage ? 'text-to-image' : activeTool,
                     settings: generationSettings
                 })
@@ -371,6 +410,37 @@ function StudioContent() {
             if (data?.image_url) {
                 setGeneratedImage(data.image_url)
                 setCredits(data.remaining_credits ?? credits - 1)
+                setGenerationProgress(100)
+                setGenerationStage('生成完成！')
+
+                // Add to history
+                const newHistoryItem = {
+                    id: `gen-${Date.now()}`,
+                    url: data.image_url,
+                    prompt: prompt || (isTextToImage ? 'AI 生图' : '图片处理'),
+                    settings: generationSettings,
+                    timestamp: Date.now()
+                }
+                setHistory(prev => [newHistoryItem, ...prev])
+
+                // Save to database
+                try {
+                    await supabase.from('generations').insert({
+                        user_id: user?.id,
+                        prompt: prompt || (isTextToImage ? 'AI 生图' : '图片处理'),
+                        result_url: data.image_url,
+                        settings: generationSettings,
+                        type: activeTool
+                    })
+                } catch (e) {
+                    console.error('Failed to save history:', e)
+                }
+
+                // Reset progress after a short delay
+                setTimeout(() => {
+                    setGenerationProgress(0)
+                    setGenerationStage('')
+                }, 2000)
             } else {
                 throw new Error("未返回图片 URL")
             }
@@ -379,6 +449,8 @@ function StudioContent() {
             console.error('Generation error:', err)
             const errorMessage = err instanceof Error ? err.message : '未知错误'
             setError("生成失败：" + errorMessage)
+            setGenerationProgress(0)
+            setGenerationStage('')
         } finally {
             setIsGenerating(false)
         }
@@ -403,6 +475,14 @@ function StudioContent() {
         }
     }
 
+    const handleHistoryClick = (historyItem: typeof history[0]) => {
+        setGeneratedImage(historyItem.url)
+        setPrompt(historyItem.prompt)
+        setGenerationSettings(historyItem.settings)
+        // Scroll to top
+        window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+
     if (isLoading) {
         return (
             <div className="flex h-[calc(100vh-64px)] items-center justify-center bg-[#0a0a0f]">
@@ -415,52 +495,88 @@ function StudioContent() {
     }
 
     return (
-        <div className="min-h-screen pt-20 pb-12 px-4">
-            <div className="container mx-auto max-w-7xl">
-                <div className="flex flex-col lg:flex-row gap-8 h-[calc(100vh-140px)]">
-
-                    {/* Left Side: Canvas & Preview (75%) */}
-                    <div className="flex-1 lg:flex-[3] flex flex-col gap-6 h-full">
-                        {/* Tool Tabs (Top) */}
-                        <div className="flex gap-4 p-1 bg-white/5 rounded-xl w-fit">
+        <div className="min-h-screen bg-[#0a0a0f]">
+            {/* Header - Tools */}
+            <div className="sticky top-16 z-40 bg-[#0a0a0f]/95 backdrop-blur-md border-b border-white/10">
+                <div className="container mx-auto px-4 py-3">
+                    <div className="flex items-center justify-between gap-4 overflow-x-auto">
+                        <div className="flex items-center gap-2">
                             {tools.map(tool => (
                                 <button
                                     key={tool.id}
                                     onClick={() => handleToolSelect(tool.id)}
-                                    className={`px-6 py-2.5 rounded-lg text-sm font-medium transition-all flex items-center gap-2 ${activeTool === tool.id
-                                        ? 'bg-indigo-600 text-white shadow-lg'
-                                        : 'text-slate-400 hover:text-white hover:bg-white/5'
-                                        }`}
+                                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
+                                        activeTool === tool.id
+                                            ? 'bg-indigo-600 text-white shadow-lg'
+                                            : 'text-slate-400 hover:text-white hover:bg-white/5'
+                                    }`}
                                 >
                                     <tool.icon className="w-4 h-4" />
                                     {tool.name}
                                 </button>
                             ))}
                         </div>
+                        <div className="flex items-center gap-4">
+                            {user ? (
+                                <>
+                                    <div className="text-sm text-slate-400">
+                                        <span className="text-white font-bold">{credits}</span> 积分
+                                    </div>
+                                    <div className="w-px h-6 bg-white/10"></div>
+                                    <div className="flex items-center gap-2">
+                                        <div className="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-xs font-bold">
+                                            {user.email?.charAt(0).toUpperCase() || 'U'}
+                                        </div>
+                                        <button
+                                            onClick={() => setShowUserMenu(true)}
+                                            className="text-slate-400 hover:text-white"
+                                        >
+                                            <ChevronDown className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                </>
+                            ) : (
+                                <button
+                                    onClick={() => setShowAuthModal(true)}
+                                    className="px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-medium hover:bg-indigo-700 transition-colors"
+                                >
+                                    登录
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
 
-                        {/* Main Canvas Area */}
-                        <div className="flex-1 card border-2 border-dashed border-white/10 relative group overflow-hidden flex flex-col items-center justify-center bg-black/20">
+            {/* Main Content */}
+            <div className="container mx-auto px-4 py-6">
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+
+                    {/* Left Column - Image Display (8 cols) */}
+                    <div className="lg:col-span-8">
+                        {/* Image Display Area */}
+                        <div className="relative bg-[#12121a] rounded-2xl border border-white/10 overflow-hidden" style={{ minHeight: '500px' }}>
                             {generatedImage ? (
-                                <div className="relative w-full h-full flex items-center justify-center p-4 overflow-auto">
-                                    <div className="relative group">
+                                <div className="absolute inset-0 flex items-center justify-center p-6 bg-[#0a0a0f]">
+                                    <div className="relative max-w-full">
                                         <img
                                             src={generatedImage}
                                             alt="Generated"
-                                            className="max-w-none max-h-full object-contain rounded-lg shadow-2xl"
-                                            style={{ maxHeight: 'calc(100vh - 250px)' }}
+                                            className="max-w-full max-h-[70vh] object-contain rounded-xl shadow-2xl"
+                                            style={{ maxHeight: 'calc(100vh - 300px)' }}
                                         />
-                                        <div className="absolute top-4 right-4 flex gap-2 opacity-80 hover:opacity-100 transition-opacity">
+                                        <div className="absolute top-4 right-4 flex gap-2">
                                             <button
                                                 onClick={() => setGeneratedImage(null)}
-                                                className="p-2 bg-red-500/90 backdrop-blur rounded-lg text-white hover:bg-red-600 transition-colors"
-                                                title="关闭图片继续生成"
+                                                className="p-2 bg-black/60 backdrop-blur rounded-lg text-white hover:bg-red-600 transition-colors"
+                                                title="关闭"
                                             >
                                                 <X className="w-5 h-5" />
                                             </button>
                                             <button
                                                 onClick={handleDownload}
-                                                className="p-2 bg-black/50 backdrop-blur rounded-lg text-white hover:bg-indigo-600 transition-colors"
-                                                title="下载图片"
+                                                className="p-2 bg-black/60 backdrop-blur rounded-lg text-white hover:bg-indigo-600 transition-colors"
+                                                title="下载"
                                             >
                                                 <Download className="w-5 h-5" />
                                             </button>
@@ -468,191 +584,189 @@ function StudioContent() {
                                     </div>
                                 </div>
                             ) : previewUrl ? (
-                                <div className="relative w-full h-full">
-                                    <img
-                                        src={previewUrl}
-                                        alt="Preview"
-                                        className="w-full h-full object-contain rounded-lg"
-                                    />
-                                    <button
-                                        onClick={() => {
-                                            setPreviewUrl(null)
-                                            setSelectedFile(null)
-                                        }}
-                                        className="absolute top-4 right-4 p-2 bg-black/50 rounded-full text-white hover:bg-red-500"
-                                    >
-                                        <X className="w-4 h-4" />
-                                    </button>
-                                </div>
-                            ) : activeTool === 'text-to-image' ? (
-                                // Text-to-image mode: show prompt input area
-                                <div className="text-center p-8 w-full max-w-2xl">
-                                    <Wand2 className="w-16 h-16 text-indigo-500 mx-auto mb-4" />
-                                    <h3 className="text-xl font-bold text-white mb-2">
-                                        AI 文生图
-                                    </h3>
-                                    <p className="text-slate-400 mb-6">
-                                        输入提示词，AI 将为您生成图片
-                                    </p>
-                                    <div className="bg-white/5 rounded-xl p-4 text-left">
-                                        <p className="text-sm text-slate-400 mb-2">提示词示例：</p>
-                                        <p className="text-xs text-slate-500 italic">
-                                            "一只可爱的橘猫坐在窗台上，阳光透过窗户洒进来，温暖的午后氛围，写实风格，8K分辨率"
-                                        </p>
+                                <div className="absolute inset-0 flex items-center justify-center p-6">
+                                    <div className="relative">
+                                        <img
+                                            src={previewUrl}
+                                            alt="Preview"
+                                            className="max-w-full max-h-[70vh] object-contain rounded-xl"
+                                        />
+                                        <button
+                                            onClick={() => {
+                                                setPreviewUrl(null)
+                                                setSelectedFile(null)
+                                            }}
+                                            className="absolute top-4 right-4 p-2 bg-black/60 rounded-full text-white hover:bg-red-600"
+                                        >
+                                            <X className="w-4 h-4" />
+                                        </button>
                                     </div>
                                 </div>
                             ) : (
-                                <div className="text-center p-8">
-                                    <Upload className="w-16 h-16 text-slate-600 mx-auto mb-4 group-hover:text-indigo-500 transition-colors" />
-                                    <h3 className="text-xl font-bold text-white mb-2">
-                                        点击或拖拽上传图片
-                                    </h3>
-                                    <p className="text-slate-400 mb-6">
-                                        支持 JPG, PNG, WEBP (最大 10MB)
-                                    </p>
-                                    <label className="btn-primary cursor-pointer inline-flex">
-                                        选择图片
-                                        <input
-                                            type="file"
-                                            className="hidden"
-                                            accept="image/*"
-                                            onChange={handleFileSelect}
-                                        />
-                                    </label>
+                                <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center">
+                                    {activeTool === 'text-to-image' ? (
+                                        <>
+                                            <Wand2 className="w-20 h-20 text-indigo-500 mx-auto mb-6" />
+                                            <h3 className="text-2xl font-bold text-white mb-3">
+                                                AI 文生图
+                                            </h3>
+                                            <p className="text-slate-400 mb-8 max-w-md">
+                                                输入提示词描述你想要的图片，AI 将为你生成作品
+                                            </p>
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Upload className="w-20 h-20 text-slate-600 mx-auto mb-6" />
+                                            <h3 className="text-2xl font-bold text-white mb-3">
+                                                上传图片开始创作
+                                            </h3>
+                                            <p className="text-slate-400 mb-8">
+                                                支持 JPG、PNG、WEBP 格式，最大 10MB
+                                            </p>
+                                            <label className="px-6 py-3 bg-indigo-600 text-white rounded-lg cursor-pointer hover:bg-indigo-700 transition-colors inline-flex items-center gap-2">
+                                                <Upload className="w-5 h-5" />
+                                                选择图片
+                                                <input
+                                                    type="file"
+                                                    className="hidden"
+                                                    accept="image/*"
+                                                    onChange={handleFileSelect}
+                                                />
+                                            </label>
+                                        </>
+                                    )}
                                 </div>
                             )}
 
-                            {/* Loading Overlay */}
+                            {/* Progress Overlay */}
                             {isGenerating && (
-                                <div className="absolute inset-0 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center z-20">
-                                    <div className="w-16 h-16 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mb-4" />
-                                    <p className="text-white font-medium animate-pulse">
-                                        AI 正在施展魔法...
-                                    </p>
+                                <div className="absolute inset-0 bg-black/90 backdrop-blur-sm flex flex-col items-center justify-center z-20">
+                                    <div className="w-full max-w-md px-6">
+                                        <div className="text-center mb-6">
+                                            <div className="w-16 h-16 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+                                            <p className="text-white text-lg font-medium mb-2">{generationStage || 'AI 正在创作...'}</p>
+                                            <p className="text-slate-400 text-sm">请稍候，这可能需要 10-30 秒</p>
+                                        </div>
+
+                                        {/* Progress Bar */}
+                                        <div className="w-full bg-white/10 rounded-full h-3 overflow-hidden">
+                                            <div
+                                                className="h-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-500 ease-out"
+                                                style={{ width: `${generationProgress}%` }}
+                                            />
+                                        </div>
+                                        <div className="text-right text-xs text-slate-400 mt-2">{generationProgress}%</div>
+                                    </div>
                                 </div>
                             )}
 
                             {/* Error Toast */}
                             {error && (
-                                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-6 py-3 bg-red-500/90 text-white rounded-lg shadow-xl backdrop-blur animate-in fade-in slide-in-from-bottom-4">
-                                    {error}
-                                    <button
-                                        onClick={() => setError(null)}
-                                        className="ml-4 hover:text-white/80"
-                                    >
-                                        <X className="w-4 h-4" />
-                                    </button>
+                                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 px-6 py-3 bg-red-500/90 text-white rounded-lg shadow-xl backdrop-blur">
+                                    <div className="flex items-center gap-3">
+                                        <span>{error}</span>
+                                        <button
+                                            onClick={() => setError(null)}
+                                            className="hover:text-white/80"
+                                        >
+                                            <X className="w-4 h-4" />
+                                        </button>
+                                    </div>
                                 </div>
                             )}
                         </div>
                     </div>
 
-                    {/* Right Side: Settings Panel (25%) */}
-                    <div className="lg:w-80 flex flex-col gap-6">
+                    {/* Right Column - Settings (4 cols) */}
+                    <div className="lg:col-span-4 space-y-4">
 
-                        {/* User Info Card */}
-                        {user && (
-                            <div className="card p-4 bg-gradient-to-r from-slate-500/10 to-slate-600/10 border-slate-500/30">
-                                <div className="flex justify-between items-center">
-                                    <div className="flex items-center gap-3">
-                                        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white font-bold">
-                                            {user.email?.charAt(0).toUpperCase() || 'U'}
-                                        </div>
-                                        <div>
-                                            <div className="text-sm font-medium text-white">
-                                                {user.email?.split('@')[0] || '用户'}
-                                            </div>
-                                            <div className="text-xs text-slate-500">
-                                                {user.email?.split('@')[1] || ''}
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div className="flex items-center gap-2">
-                                        <button
-                                            onClick={() => setShowUserMenu(true)}
-                                            className="text-slate-400 hover:text-white transition-colors px-2 py-1 rounded hover:bg-white/10"
-                                            title="功能菜单"
-                                        >
-                                            <Menu className="w-4 h-4" />
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Credits Card */}
-                        <div className="card p-4 bg-gradient-to-r from-indigo-500/10 to-purple-500/10 border-indigo-500/30">
-                            <div className="flex justify-between items-center mb-2">
-                                <span className="text-sm text-slate-400">剩余积分</span>
-                                <Link href="/pricing">
-                                    <button className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1">
-                                        充值 <ArrowRight className="w-3 h-3" />
-                                    </button>
-                                </Link>
-                            </div>
-                            <div className="flex items-baseline gap-2">
-                                <span className="text-2xl font-bold text-white">{credits}</span>
-                                <span className="text-xs text-slate-500">积分</span>
-                            </div>
-                            {DEV_MODE && credits > 1000 && (
-                                <div className="mt-2 text-xs text-yellow-500/80 bg-yellow-500/10 px-2 py-1 rounded">
-                                    开发者模式 - 无限积分
-                                </div>
-                            )}
+                        {/* Prompt Input */}
+                        <div className="card p-5">
+                            <label className="text-sm font-medium text-slate-300 mb-3 block">
+                                提示词
+                            </label>
+                            <textarea
+                                value={prompt}
+                                onChange={(e) => setPrompt(e.target.value)}
+                                placeholder="描述你想要的效果，例如：一只可爱的橘猫坐在窗台上，阳光温暖..."
+                                className="input-field w-full h-32 resize-none text-sm"
+                            />
                         </div>
 
-                        {/* Settings Form */}
-                        <div className="card p-6 flex-1 overflow-y-auto space-y-6">
-
-                            {/* Prompt Input */}
-                            <div>
-                                <label className="text-sm font-medium text-slate-300 mb-2 block">
-                                    提示词 (Prompt)
-                                </label>
-                                <textarea
-                                    value={prompt}
-                                    onChange={(e) => setPrompt(e.target.value)}
-                                    placeholder="描述你想要的效果..."
-                                    className="input-field h-24 resize-none text-sm"
-                                />
-                            </div>
-
-                            {/* Generation Settings Panel */}
+                        {/* Generation Settings */}
+                        <div className="card p-5">
                             <GenerationSettingsPanel
                                 settings={generationSettings}
                                 onSettingsChange={setGenerationSettings}
                                 disabled={isGenerating}
                             />
+                        </div>
 
-                            {/* Generate Button */}
-                            <div className="mt-auto">
-                                <button
-                                    onClick={handleGenerate}
-                                    disabled={
-                                        isGenerating ||
-                                        credits < currentCreditCost ||
-                                        (activeTool === 'text-to-image' ? !prompt.trim() : !selectedFile)
-                                    }
-                                    className="btn-primary w-full py-3 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed group"
-                                >
-                                    <Sparkles className="w-4 h-4 group-hover:animate-spin-slow" />
-                                    {isGenerating ? '生成中...' : `立即生成 (${getCreditDisplayText(currentCreditCost)})`}
-                                </button>
-                                {credits < currentCreditCost && (
-                                    <p className="text-xs text-red-400 text-center mt-2">
-                                        积分不足 (需要 {currentCreditCost} 积分)，请先充值
-                                    </p>
-                                )}
-                                {activeTool === 'text-to-image' && !prompt.trim() && (
-                                    <p className="text-xs text-slate-500 text-center mt-2">
-                                        请输入提示词来生成图片
-                                    </p>
-                                )}
+                        {/* Generate Button */}
+                        <button
+                            onClick={handleGenerate}
+                            disabled={
+                                isGenerating ||
+                                credits < currentCreditCost ||
+                                (activeTool === 'text-to-image' ? !prompt.trim() : !selectedFile)
+                            }
+                            className="w-full btn-primary py-4 flex items-center justify-center gap-3 text-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed group"
+                        >
+                            <Sparkles className="w-5 h-5 group-hover:animate-spin-slow" />
+                            {isGenerating ? '生成中...' : `立即生成`}
+                            {!isGenerating && <span className="text-sm opacity-75">({getCreditDisplayText(currentCreditCost)})</span>}
+                        </button>
+
+                        {credits < currentCreditCost && (
+                            <div className="card p-4 bg-red-500/10 border-red-500/30 text-center">
+                                <p className="text-red-400 text-sm">
+                                    积分不足 (需要 {currentCreditCost} 积分)
+                                </p>
+                                <Link href="/pricing" className="inline-block mt-2 text-sm text-indigo-400 hover:text-indigo-300">
+                                    前往充值 →
+                                </Link>
                             </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* History Section */}
+                {history.length > 0 && (
+                    <div className="container mx-auto px-4 py-8">
+                        <div className="flex items-center justify-between mb-4">
+                            <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                                <ImageIcon className="w-5 h-5 text-indigo-500" />
+                                生成记录
+                            </h2>
+                            <Link href="/pricing" className="text-sm text-indigo-400 hover:text-indigo-300 flex items-center gap-1">
+                                查看全部 <ArrowRight className="w-4 h-4" />
+                            </Link>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+                            {history.slice(0, 6).map((item) => (
+                                <div
+                                    key={item.id}
+                                    onClick={() => handleHistoryClick(item)}
+                                    className="group relative aspect-square bg-[#12121a] rounded-xl overflow-hidden border border-white/10 cursor-pointer hover:border-indigo-500/50 transition-all"
+                                >
+                                    <img
+                                        src={item.url}
+                                        alt={item.prompt}
+                                        className="w-full h-full object-cover"
+                                    />
+                                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
+                                        <div className="absolute bottom-0 left-0 right-0 p-3">
+                                            <p className="text-white text-xs line-clamp-2 mb-1">{item.prompt}</p>
+                                            <p className="text-slate-400 text-xs">
+                                                {new Date(item.timestamp).toLocaleDateString()}
+                                            </p>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
                         </div>
                     </div>
-
-                </div>
+                )}
             </div>
 
             {/* Panels */}
