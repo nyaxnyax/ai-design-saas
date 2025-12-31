@@ -133,14 +133,48 @@ export async function POST(request: Request) {
         // 3. Verify password against phone_users.password_hash
         const isPasswordValid = await bcrypt.compare(password, phoneUser.password_hash)
 
+        const shadowEmail = `${phone}@phone.login`
+        const shadowPassword = generateShadowPassword(password, phone)
+
+        // If phone_users password doesn't match, try Supabase Auth as fallback
+        // This handles the case where passwords are out of sync
         if (!isPasswordValid) {
-            return NextResponse.json({ error: 'Invalid password' }, { status: 401 })
+            console.warn('[Login] phone_users password mismatch, trying Supabase Auth fallback...')
+
+            // Try to sign in with Supabase Auth
+            const { data: sessionData, error: sessionError } = await supabaseAdmin.auth.signInWithPassword({
+                email: shadowEmail,
+                password: shadowPassword
+            })
+
+            if (sessionError || !sessionData.session) {
+                // Both auth methods failed - password is really wrong
+                console.error('[Login] Password verification failed')
+                return NextResponse.json({
+                    error: '密码错误，如忘记密码请使用重置密码功能',
+                    code: 'INVALID_PASSWORD'
+                }, { status: 401 })
+            }
+
+            // Supabase Auth succeeded! Update phone_users password to sync
+            console.log('[Login] Supabase Auth successful, syncing phone_users password...')
+            const newPasswordHash = await bcrypt.hash(password, 10)
+            await supabaseAdmin
+                .from('phone_users')
+                .update({ password_hash: newPasswordHash, updated_at: new Date().toISOString() })
+                .eq('id', phoneUser.id)
+
+            console.log('[Login] Password synced successfully')
+
+            return NextResponse.json({
+                success: true,
+                session: sessionData.session,
+                message: '登录成功，密码已自动同步'
+            })
         }
 
         // 4. Sign in using shadow email and deterministic shadow password
         // This recreates the same shadow password used during registration
-        const shadowEmail = `${phone}@phone.login`
-        const shadowPassword = generateShadowPassword(password, phone)
 
         const { data: sessionData, error: sessionError } = await supabaseAdmin.auth.signInWithPassword({
             email: shadowEmail,
