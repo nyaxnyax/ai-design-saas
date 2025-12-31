@@ -47,35 +47,10 @@ export async function POST(request: Request) {
 
             if (existingAuthUser) {
                 // Shadow user exists but phone_users record is missing
-                // Auto-fix: Create the missing phone_users record
-                console.warn(`[Login] Data inconsistency found: shadow user exists for ${phone} but phone_users record missing. Auto-fixing...`)
+                // Strategy: First update auth password, then try auth login, then create phone_users record
+                console.warn(`[Login] Data inconsistency: shadow user exists for ${phone} but phone_users missing. Attempting repair...`)
 
-                // Generate a default password hash for the auto-fix
-                // User will need to use the password they tried to login with
-                const defaultPasswordHash = await bcrypt.hash(password, 10)
-
-                const { data: newPhoneUser, error: insertError } = await supabaseAdmin
-                    .from('phone_users')
-                    .insert({
-                        phone: phone,
-                        password_hash: defaultPasswordHash,
-                        supabase_user_id: existingAuthUser.id,  // Link to existing auth user
-                        updated_at: new Date().toISOString()
-                    })
-                    .select()
-                    .single()
-
-                if (insertError || !newPhoneUser) {
-                    console.error('[Login] Failed to auto-fix missing phone_users record:', insertError)
-                    return NextResponse.json({
-                        error: 'Account data error, please reset password or contact support',
-                        code: 'DATA_INCONSISTENCY'
-                    }, { status: 400 })
-                }
-
-                console.log('[Login] Auto-fix successful, created phone_users record for:', phone)
-
-                // Also update the auth user's password to match the user's current password
+                // Step 1: Update auth user's password
                 const shadowPassword = generateShadowPassword(password, phone)
                 const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(
                     existingAuthUser.id,
@@ -83,25 +58,68 @@ export async function POST(request: Request) {
                 )
 
                 if (updateError) {
-                    console.warn('[Login] Warning: Failed to update auth user password:', updateError)
-                    // Continue anyway - the phone_users record was created
+                    console.warn('[Login] Failed to update auth password:', updateError)
                 }
 
-                // Sign in using shadow email and shadow password
+                // Step 2: Try to sign in with Supabase Auth (bypasses RLS)
                 const { data: sessionData, error: sessionError } = await supabaseAdmin.auth.signInWithPassword({
                     email: shadowEmail,
                     password: shadowPassword
                 })
 
-                if (sessionError) {
-                    console.error('Session Error after auto-fix:', sessionError)
-                    return NextResponse.json({ error: 'Login failed, please try again' }, { status: 500 })
+                if (sessionError || !sessionData.session) {
+                    console.error('[Login] Auth failed after repair attempt:', sessionError)
+                    return NextResponse.json({
+                        error: '密码错误或账号异常，请使用重置密码功能',
+                        code: 'AUTH_FAILED'
+                    }, { status: 401 })
+                }
+
+                console.log('[Login] Auth successful! Now creating phone_users record...')
+
+                // Step 3: Create phone_users record AFTER successful auth
+                const passwordHash = await bcrypt.hash(password, 10)
+                const { error: insertError } = await supabaseAdmin
+                    .from('phone_users')
+                    .insert({
+                        phone: phone,
+                        password_hash: passwordHash,
+                        supabase_user_id: existingAuthUser.id,
+                        created_at: new Date().toISOString(),
+                        updated_at: new Date().toISOString()
+                    })
+
+                if (insertError) {
+                    console.warn('[Login] Warning: Could not create phone_users record after auth:', insertError)
+                    // Continue anyway - user is authenticated
+                } else {
+                    console.log('[Login] phone_users record created successfully')
+                }
+
+                // Step 4: Initialize credits if needed
+                const { data: existingCredits } = await supabaseAdmin
+                    .from('user_credits')
+                    .select('*')
+                    .eq('user_id', existingAuthUser.id)
+                    .maybeSingle()
+
+                if (!existingCredits) {
+                    await supabaseAdmin
+                        .from('user_credits')
+                        .insert({
+                            user_id: existingAuthUser.id,
+                            balance: 15,
+                            daily_generations: 0,
+                            last_daily_reset: new Date().toISOString()
+                        })
+                    console.log('[Login] Credits initialized for user')
                 }
 
                 return NextResponse.json({
                     success: true,
                     session: sessionData.session,
-                    autoFixed: true
+                    autoFixed: true,
+                    message: '登录成功，账号数据已自动修复'
                 })
             }
 
