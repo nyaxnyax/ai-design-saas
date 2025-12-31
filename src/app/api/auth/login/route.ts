@@ -59,6 +59,7 @@ export async function POST(request: Request) {
                     .insert({
                         phone: phone,
                         password_hash: defaultPasswordHash,
+                        supabase_user_id: existingAuthUser.id,  // Link to existing auth user
                         updated_at: new Date().toISOString()
                     })
                     .select()
@@ -74,16 +75,19 @@ export async function POST(request: Request) {
 
                 console.log('[Login] Auto-fix successful, created phone_users record for:', phone)
 
-                // Continue with login using the newly created record
-                // Verify password against the newly created hash
-                const isPasswordValid = await bcrypt.compare(password, newPhoneUser.password_hash)
+                // Also update the auth user's password to match the user's current password
+                const shadowPassword = generateShadowPassword(password, phone)
+                const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(
+                    existingAuthUser.id,
+                    { password: shadowPassword }
+                )
 
-                if (!isPasswordValid) {
-                    return NextResponse.json({ error: 'Invalid password' }, { status: 401 })
+                if (updateError) {
+                    console.warn('[Login] Warning: Failed to update auth user password:', updateError)
+                    // Continue anyway - the phone_users record was created
                 }
 
                 // Sign in using shadow email and shadow password
-                const shadowPassword = generateShadowPassword(password, phone)
                 const { data: sessionData, error: sessionError } = await supabaseAdmin.auth.signInWithPassword({
                     email: shadowEmail,
                     password: shadowPassword
