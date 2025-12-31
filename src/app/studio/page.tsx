@@ -113,10 +113,13 @@ function StudioContent() {
                     } else if (mounted) {
                         console.warn('[Studio] No credits record found, initializing...')
                         try {
+                            // Get session for auth header
+                            const { data: { session } } = await supabase.auth.getSession()
                             const initResponse = await fetch('/api/auth/init-credits', {
                                 method: 'POST',
                                 headers: {
                                     'Content-Type': 'application/json',
+                                    ...(session?.access_token ? { 'Authorization': `Bearer ${session.access_token}` } : {})
                                 }
                             })
                             if (initResponse.ok) {
