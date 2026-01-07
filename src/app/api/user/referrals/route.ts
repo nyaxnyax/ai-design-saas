@@ -1,5 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
+
+export const dynamic = 'force-dynamic'
 import crypto from 'crypto'
 
 const supabaseAdmin = createClient(

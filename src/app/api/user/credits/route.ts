@@ -1,6 +1,8 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
 
+export const dynamic = 'force-dynamic'
+
 const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -23,12 +25,12 @@ export async function GET(request: Request) {
         // Get current balance
         const { data: creditsData } = await supabaseAdmin
             .from('user_credits')
-            .select('balance')
-            .eq('user_id', user.id)
+            .select('balance, last_daily_reset')
             .eq('user_id', user.id)
             .single()
 
         let currentBalance = creditsData?.balance || 0
+        // @ts-ignore
         let lastReset = creditsData?.last_daily_reset || new Date(0).toISOString()
 
         // Check if user is a paid user
