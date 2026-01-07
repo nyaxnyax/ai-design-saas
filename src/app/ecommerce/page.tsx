@@ -260,9 +260,9 @@ export default function EcommercePage() {
                             if (!isSameDay) dailyUsed = 0;
                          }
 
-                         // Total = Balance + Remaining Free (Max 10)
-                         const freeRemaining = Math.max(0, 10 - dailyUsed);
-                         setCredits((creditsData.balance || 0) + freeRemaining);
+                         // Strict Balance Display: Trust the DB balance.
+                         // Backend handles daily resets/top-ups.
+                         setCredits(creditsData.balance || 0);
                     }
                 }
             } catch (error) {
