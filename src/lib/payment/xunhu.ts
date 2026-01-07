@@ -26,15 +26,15 @@ export function generateHash(data: Record<string, string | number>, appSecret: s
     }
   }
 
-  pairs.push(`key=${appSecret}`);
-  const signString = pairs.join('&');
-  
+  // 虎皮椒签名算法：按参数名升序排序，用&连接，最后直接拼接appSecret（不带&key=）
+  const signString = pairs.join('&') + appSecret;
+
   return crypto.createHash('md5').update(signString).digest('hex');
 }
 
 export const XUNHU_CONFIG: XunhuConfig = {
-  appId: process.env.XUNHU_APPID || '',
-  appSecret: process.env.XUNHU_APPSECRET || '',
+  appId: (process.env.XUNHU_APP_ID || '').trim(),
+  appSecret: (process.env.XUNHU_APP_SECRET || '').trim(),
   notifyUrl: `${process.env.NEXT_PUBLIC_BASE_URL}/api/payment/notify`,
   returnUrl: `${process.env.NEXT_PUBLIC_BASE_URL}/pricing?status=success`,
   apiUrl: 'https://api.xunhupay.com/payment/do.html',

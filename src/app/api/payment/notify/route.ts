@@ -17,16 +17,19 @@ export async function POST(request: Request) {
         console.log('Payment Notify Received:', data);
 
         // 1. Verify Signature
-        const { hash, ...params } = data;
-        const computedHash = generateHash(params, XUNHU_CONFIG.appSecret || '');
+        // 关键：克隆一个不包含 hash 的对象用于校验
+        const { hash: receivedHash, ...paramsToVerify } = data;
+        const computedHash = generateHash(paramsToVerify, XUNHU_CONFIG.appSecret || '');
 
-        if (hash !== computedHash) {
-            console.error('Invalid Signature');
+        console.log('Signature Check:', { received: receivedHash, computed: computedHash });
+
+        if (receivedHash !== computedHash) {
+            console.error('Invalid Signature for Order:', paramsToVerify.trade_order_id);
             return new NextResponse('fail', { status: 400 });
         }
 
         // 2. Check Payment Status
-        if (params.status === 'OD') { // OD means Order Done (Success)
+        if (paramsToVerify.status === 'OD') { // OD means Order Done (Success)
 
             // 3. Update Order in DB
             const supabase = await createClient(); // Use service role if needed? Wait, 'createClient' uses standard cookie auth or anon?
@@ -87,7 +90,7 @@ export async function POST(request: Request) {
             // Or just alter table to add `trade_id` column?
             // No, I can put it in metadata.
 
-            const tradeOrderId = params.trade_order_id;
+            const tradeOrderId = paramsToVerify.trade_order_id;
 
             const { data: orderData, error: findError } = await internalClient
                 .from('orders')
@@ -109,7 +112,7 @@ export async function POST(request: Request) {
                 .from('orders')
                 .update({
                     status: 'paid',
-                    provider_trade_no: params.open_order_id, // Xunhu's ID
+                    provider_trade_no: paramsToVerify.open_order_id, // Xunhu's ID
                     updated_at: new Date().toISOString()
                 })
                 .eq('id', orderData.id);
@@ -128,44 +131,52 @@ export async function POST(request: Request) {
             let subTier: string | null = null;
             let subDurationMonths = 0;
 
-            // Credit Packs
+            // 积分包与订阅发放逻辑 (漏洞防御版)
             switch (planId) {
-                case 'new_user_gift':
-                    creditsToAdd = 50;
+                // --- 积分包 (一次性) ---
+                case 'gift':
+                    creditsToAdd = 30;
                     break;
                 case 'starter':
                     creditsToAdd = 100;
                     break;
                 case 'popular':
-                    // 550 credits (500 + 50 bonus)
-                    creditsToAdd = 550;
-                    break;
-                case 'value':
-                    // 1200 credits (1000 + 200 bonus)
-                    creditsToAdd = 1200;
+                    creditsToAdd = 650; // 含 50 赠送
                     break;
                 case 'expert':
-                    // 3300 credits (3000 + 300 bonus)
-                    creditsToAdd = 3300;
+                    creditsToAdd = 4000; // 含 500 赠送
                     break;
 
-                // Subscriptions
-                case 'basic':
-                    creditsToAdd = 100;
-                    subTier = 'basic';
-                    // Check if yearly (approx 99 vs 9.9)
-                    // Safe threshold check
-                    subDurationMonths = amount > 50 ? 12 : 1;
+                // --- 订阅方案 (按月/按年) ---
+                case 'lite':
+                    subTier = 'lite';
+                    if (amount > 200) { // 年付 (289 > 200)
+                        creditsToAdd = 225 * 12; // 一次性发放全年
+                        subDurationMonths = 12;
+                    } else {
+                        creditsToAdd = 225;
+                        subDurationMonths = 1;
+                    }
                     break;
                 case 'pro':
-                    creditsToAdd = 600;
                     subTier = 'pro';
-                    subDurationMonths = amount > 200 ? 12 : 1;
+                    if (amount > 500) { // 年付 (890 > 500)
+                        creditsToAdd = 750 * 12;
+                        subDurationMonths = 12;
+                    } else {
+                        creditsToAdd = 750;
+                        subDurationMonths = 1;
+                    }
                     break;
-                case 'enterprise':
-                    creditsToAdd = 3000;
-                    subTier = 'enterprise';
-                    subDurationMonths = amount > 1000 ? 12 : 1;
+                case 'agency':
+                    subTier = 'agency';
+                    if (amount > 2000) { // 年付 (2890 > 2000)
+                        creditsToAdd = 2250 * 12;
+                        subDurationMonths = 12;
+                    } else {
+                        creditsToAdd = 2250;
+                        subDurationMonths = 1;
+                    }
                     break;
             }
 

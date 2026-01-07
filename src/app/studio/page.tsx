@@ -15,6 +15,7 @@ import { CreditsPanel } from '@/components/studio/CreditsPanel'
 import { SettingsPanel } from '@/components/studio/SettingsPanel'
 import { TutorialPanel } from '@/components/studio/TutorialPanel'
 import { InvitePanel } from '@/components/studio/InvitePanel'
+import GiftModal from '@/components/pricing/GiftModal'
 import type { User } from '@supabase/supabase-js'
 import type { GenerationSettings } from '@/types/generation'
 import { calculateCreditCost, getCreditDisplayText } from '@/lib/credit-calculator'
@@ -70,7 +71,11 @@ function StudioContent() {
     const [showSettings, setShowSettings] = useState(false)
     const [showTutorial, setShowTutorial] = useState(false)
     const [showInvite, setShowInvite] = useState(false)
+    const [showGiftModal, setShowGiftModal] = useState(false)
+    const [userTier, setUserTier] = useState<string>('free')
     const [isLoading, setIsLoading] = useState(true)
+    const [downloadFormat, setDownloadFormat] = useState<'png' | 'jpg'>('png')
+    const [showDownloadMenu, setShowDownloadMenu] = useState(false)
     const fileInputRef = useRef<HTMLInputElement>(null)
     const supabase = createClient()
     const router = useRouter()
@@ -99,9 +104,9 @@ function StudioContent() {
                 if (user) {
                     const { data: creditsData, error: creditsError } = await supabase
                         .from('user_credits')
-                        .select('balance')
+                        .select('balance, subscription_tier')
                         .eq('user_id', user.id)
-                        .maybeSingle()
+                        .maybeSingle() as { data: { balance: number; subscription_tier: string } | null; error: any }
 
                     if (creditsError) {
                         console.error('Error loading credits:', creditsError)
@@ -109,7 +114,8 @@ function StudioContent() {
 
                     if (creditsData && mounted) {
                         setCredits(creditsData.balance)
-                        console.log('[Studio] Credits loaded:', creditsData.balance)
+                        setUserTier(creditsData.subscription_tier || 'free')
+                        console.log('[Studio] Credits & Tier loaded:', creditsData.balance, creditsData.subscription_tier)
                     } else if (mounted) {
                         console.warn('[Studio] No credits record found, initializing...')
                         try {
@@ -170,9 +176,9 @@ function StudioContent() {
                 setShowAuthModal(false)
                 const { data: creditsData, error: creditsError } = await supabase
                     .from('user_credits')
-                    .select('balance')
+                    .select('balance, subscription_tier')
                     .eq('user_id', session.user.id)
-                    .maybeSingle()
+                    .maybeSingle() as { data: any, error: any }
 
                 if (creditsError) {
                     console.error('[Studio] Auth state change - Error loading credits:', creditsError)
@@ -180,7 +186,8 @@ function StudioContent() {
 
                 if (creditsData) {
                     setCredits(creditsData.balance)
-                    console.log('[Studio] Auth state change - Credits loaded:', creditsData.balance)
+                    setUserTier(creditsData.subscription_tier || 'free')
+                    console.log('[Studio] Auth state change - Credits & Tier loaded:', creditsData.balance, creditsData.subscription_tier)
                 } else {
                     console.warn('[Studio] Auth state change - No credits found, initializing...')
                     try {
@@ -373,8 +380,23 @@ function StudioContent() {
 
         const cost = calculateCreditCost(activeTool, generationSettings)
         if (!DEV_MODE && credits < cost) {
-            setError(`积分不足 (需要 ${cost} 积分)，请充值后再试`)
+            setShowGiftModal(true)
             return
+        }
+
+        // --- 虚拟排队逻辑与身份溢价 (Identity Premium) ---
+        // 判定条件：晚间高峰期 (20:00 - 23:00) 且 非专业版/商业版用户
+        const now = new Date()
+        const currentHour = now.getHours()
+        const isPeakTime = currentHour >= 20 && currentHour <= 23
+        const isPremiumUser = userTier === 'pro' || userTier === 'agency'
+
+        if (!DEV_MODE && isPeakTime && !isPremiumUser) {
+            setIsGenerating(true)
+            setGenerationStage('服务器繁忙，正在为您排队... (当前位置: 12)')
+            setGenerationProgress(5)
+            // 强制等待 15 秒模拟排队
+            await new Promise(resolve => setTimeout(resolve, 15000))
         }
 
         // Batch mode: generate multiple images in sequence
@@ -620,23 +642,136 @@ function StudioContent() {
         }
     }
 
-    const handleDownload = async () => {
+    const handleDownload = async (format?: 'png' | 'jpg') => {
         if (!generatedImage) return
 
+        const selectedFormat = format || downloadFormat
+        setShowDownloadMenu(false)
+
         try {
-            const response = await fetch(generatedImage)
-            const blob = await response.blob()
+            let blob: Blob | undefined
+            let fileName = `designai-pro-${Date.now()}.${selectedFormat}`
+
+            // Check if it's a base64 data URI
+            if (generatedImage.startsWith('data:')) {
+                // Extract the MIME type and base64 data
+                const matches = generatedImage.match(/^data:([^;]+);base64,(.+)$/)
+                if (matches) {
+                    const mimeType = matches[1]
+                    const base64Data = matches[2]
+
+                    // Convert base64 to blob
+                    const byteCharacters = atob(base64Data)
+                    const byteNumbers = new Array(byteCharacters.length)
+                    for (let i = 0; i < byteCharacters.length; i++) {
+                        byteNumbers[i] = byteCharacters.charCodeAt(i)
+                    }
+                    const byteArray = new Uint8Array(byteNumbers)
+                    blob = new Blob([byteArray], { type: mimeType })
+
+                    // Convert format if needed
+                    if (selectedFormat === 'jpg' && mimeType !== 'image/jpeg') {
+                        // Convert to JPG
+                        blob = await convertBlobToJpeg(blob)
+                    } else if (selectedFormat === 'png' && mimeType !== 'image/png') {
+                        // Convert to PNG (keep as is if already PNG)
+                        if (mimeType === 'image/jpeg' || mimeType === 'image/webp') {
+                            // Will be converted to PNG format below
+                        }
+                    }
+                } else {
+                    throw new Error('Invalid data URI format')
+                }
+            } else {
+                // Regular URL - fetch as blob
+                const response = await fetch(generatedImage)
+                blob = await response.blob()
+            }
+
+            // Validate blob before proceeding
+            if (!blob) {
+                throw new Error('Failed to process image')
+            }
+
+            // Ensure final blob matches selected format
+            if (selectedFormat === 'jpg' && blob.type !== 'image/jpeg') {
+                blob = await convertBlobToJpeg(blob)
+            } else if (selectedFormat === 'png' && blob.type !== 'image/png') {
+                blob = await convertBlobToPng(blob)
+            }
+
+            // Create download link
             const url = window.URL.createObjectURL(blob)
             const a = document.createElement('a')
             a.href = url
-            a.download = `designai-pro-${Date.now()}.png`
+            a.download = fileName
             document.body.appendChild(a)
             a.click()
             window.URL.revokeObjectURL(url)
             document.body.removeChild(a)
+
+            console.log('Download successful:', fileName)
         } catch (err) {
             console.error('Download error:', err)
+            alert('下载失败，请重试')
         }
+    }
+
+    // Helper function to convert blob to JPEG
+    const convertBlobToJpeg = async (blob: Blob): Promise<Blob> => {
+        return new Promise((resolve, reject) => {
+            const img = document.createElement('img')
+            img.onload = () => {
+                const canvas = document.createElement('canvas')
+                canvas.width = img.width
+                canvas.height = img.height
+                const ctx = canvas.getContext('2d')
+                if (!ctx) {
+                    reject(new Error('Failed to get canvas context'))
+                    return
+                }
+                // Fill white background for JPEG
+                ctx.fillStyle = '#FFFFFF'
+                ctx.fillRect(0, 0, canvas.width, canvas.height)
+                ctx.drawImage(img, 0, 0)
+                canvas.toBlob((convertedBlob) => {
+                    if (convertedBlob) {
+                        resolve(convertedBlob)
+                    } else {
+                        reject(new Error('Failed to convert to JPEG'))
+                    }
+                }, 'image/jpeg', 0.95)
+            }
+            img.onerror = () => reject(new Error('Failed to load image'))
+            img.src = URL.createObjectURL(blob)
+        })
+    }
+
+    // Helper function to convert blob to PNG
+    const convertBlobToPng = async (blob: Blob): Promise<Blob> => {
+        return new Promise((resolve, reject) => {
+            const img = document.createElement('img')
+            img.onload = () => {
+                const canvas = document.createElement('canvas')
+                canvas.width = img.width
+                canvas.height = img.height
+                const ctx = canvas.getContext('2d')
+                if (!ctx) {
+                    reject(new Error('Failed to get canvas context'))
+                    return
+                }
+                ctx.drawImage(img, 0, 0)
+                canvas.toBlob((convertedBlob) => {
+                    if (convertedBlob) {
+                        resolve(convertedBlob)
+                    } else {
+                        reject(new Error('Failed to convert to PNG'))
+                    }
+                }, 'image/png')
+            }
+            img.onerror = () => reject(new Error('Failed to load image'))
+            img.src = URL.createObjectURL(blob)
+        })
     }
 
     const handleHistoryClick = (historyItem: typeof history[0]) => {
@@ -669,11 +804,10 @@ function StudioContent() {
                                 <button
                                     key={tool.id}
                                     onClick={() => handleToolSelect(tool.id)}
-                                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ${
-                                        activeTool === tool.id
-                                            ? 'bg-indigo-600 text-white shadow-lg'
-                                            : 'text-slate-400 hover:text-white hover:bg-white/5'
-                                    }`}
+                                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all whitespace-nowrap flex items-center gap-2 ${activeTool === tool.id
+                                        ? 'bg-indigo-600 text-white shadow-lg'
+                                        : 'text-slate-400 hover:text-white hover:bg-white/5'
+                                        }`}
                                 >
                                     <tool.icon className="w-4 h-4" />
                                     {tool.name}
@@ -737,13 +871,34 @@ function StudioContent() {
                                             >
                                                 <X className="w-5 h-5" />
                                             </button>
-                                            <button
-                                                onClick={handleDownload}
-                                                className="p-2 bg-black/60 backdrop-blur rounded-lg text-white hover:bg-indigo-600 transition-colors"
-                                                title="下载"
-                                            >
-                                                <Download className="w-5 h-5" />
-                                            </button>
+                                            <div className="relative">
+                                                <button
+                                                    onClick={() => setShowDownloadMenu(!showDownloadMenu)}
+                                                    className="p-2 bg-black/60 backdrop-blur rounded-lg text-white hover:bg-indigo-600 transition-colors flex items-center gap-1"
+                                                    title="下载"
+                                                >
+                                                    <Download className="w-5 h-5" />
+                                                    <ChevronDown className="w-3 h-3" />
+                                                </button>
+                                                {showDownloadMenu && (
+                                                    <div className="absolute top-full right-0 mt-2 bg-[#1a1a2e] border border-white/10 rounded-lg shadow-xl overflow-hidden min-w-[120px]">
+                                                        <button
+                                                            onClick={() => handleDownload('png')}
+                                                            className="w-full px-4 py-2 text-left text-sm text-white hover:bg-indigo-600 transition-colors flex items-center gap-2"
+                                                        >
+                                                            <span className="w-3 h-3 rounded bg-green-500"></span>
+                                                            下载 PNG
+                                                        </button>
+                                                        <button
+                                                            onClick={() => handleDownload('jpg')}
+                                                            className="w-full px-4 py-2 text-left text-sm text-white hover:bg-indigo-600 transition-colors flex items-center gap-2"
+                                                        >
+                                                            <span className="w-3 h-3 rounded bg-blue-500"></span>
+                                                            下载 JPG
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
@@ -941,6 +1096,16 @@ function StudioContent() {
             <SettingsPanel isOpen={showSettings} onClose={() => setShowSettings(false)} user={user} />
             <TutorialPanel isOpen={showTutorial} onClose={() => setShowTutorial(false)} />
             <InvitePanel isOpen={showInvite} onClose={() => setShowInvite(false)} />
+            {/* 耗尽拦截特惠弹窗 */}
+            <GiftModal
+                isOpen={showGiftModal}
+                onClose={() => setShowGiftModal(false)}
+                onBuy={async (planId, amount, name) => {
+                    setShowGiftModal(false)
+                    // 调用现有的支付逻辑 (跳转到定价中心处理)
+                    router.push(`/pricing?plan=${planId}&amount=${amount}&name=${encodeURIComponent(name)}`)
+                }}
+            />
         </div>
     )
 }

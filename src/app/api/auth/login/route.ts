@@ -1,5 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
+
+export const dynamic = 'force-dynamic'
 import bcrypt from 'bcryptjs'
 import crypto from 'crypto'
 
@@ -108,7 +110,7 @@ export async function POST(request: Request) {
                         .from('user_credits')
                         .insert({
                             user_id: existingAuthUser.id,
-                            balance: 15,
+                            balance: 10,
                             daily_generations: 0,
                             last_daily_reset: new Date().toISOString()
                         })

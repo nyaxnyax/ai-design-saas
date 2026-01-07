@@ -15,11 +15,13 @@ export async function POST(request: Request) {
         }
 
         // 2. Prepare Trade ID (UUID without hyphens for Xunhu)
-        // We generate the UUID by DB default, but we need it here.
-        // So let's generate it manually or insert then update? 
-        // Easier: Let DB generate, get it, then calculate tradeId.
+        // Use Service Role client to bypass RLS for order creation
+        const supabaseAdmin = require('@supabase/supabase-js').createClient(
+            process.env.NEXT_PUBLIC_SUPABASE_URL!,
+            process.env.SUPABASE_SERVICE_ROLE_KEY!
+        );
 
-        const { data: order, error: orderError } = await supabase
+        const { data: order, error: orderError } = await supabaseAdmin
             .from('orders')
             .insert({
                 user_id: user.id,
@@ -27,7 +29,6 @@ export async function POST(request: Request) {
                 amount: amount,
                 status: 'pending',
                 metadata: { plan_name: planName }
-                // We will update 'trade_id' after insert or just use generated ID?
             })
             .select()
             .single();
@@ -40,11 +41,18 @@ export async function POST(request: Request) {
         const tradeOrderId = order.id.replace(/-/g, ''); // 32 chars
 
         // Update order with trade_id so we can look it up easily in callback
-        await supabase.from('orders').update({
+        await supabaseAdmin.from('orders').update({
             metadata: { ...order.metadata, trade_id: tradeOrderId }
         }).eq('id', order.id);
 
         // 3. Prepare Xunhu Pay Parameters
+        console.log('[PAYMENT] XUNHU_CONFIG:', {
+            hasAppId: !!XUNHU_CONFIG.appId,
+            appId: XUNHU_CONFIG.appId,
+            hasAppSecret: !!XUNHU_CONFIG.appSecret,
+            apiUrl: XUNHU_CONFIG.apiUrl
+        });
+
         if (!XUNHU_CONFIG.appId || !XUNHU_CONFIG.appSecret) {
             // Graceful fallback for MVP if keys missing
             console.warn('Xunhu API keys missing')
@@ -57,15 +65,13 @@ export async function POST(request: Request) {
             version: '1.1',
             appid: XUNHU_CONFIG.appId,
             trade_order_id: tradeOrderId,
-            total_fee: amount,
-            title: `Plan: ${planName}`,
+            total_fee: Number(amount).toFixed(2),
+            title: planName, // 使用中文标题，不要前缀
             time: Math.floor(Date.now() / 1000),
             notify_url: XUNHU_CONFIG.notifyUrl,
             return_url: XUNHU_CONFIG.returnUrl,
             callback_url: XUNHU_CONFIG.returnUrl,
             nonce_str: Math.random().toString(36).substring(2, 15),
-            type: 'Wap',
-            wap_url: process.env.NEXT_PUBLIC_BASE_URL,
         };
 
         params.hash = generateHash(params, XUNHU_CONFIG.appSecret);
@@ -75,6 +81,11 @@ export async function POST(request: Request) {
             formData.append(key, params[key]);
         }
 
+        console.log('[PAYMENT] Request params:', {
+            ...params,
+            hash: params.hash.substring(0, 10) + '...'
+        });
+
         const response = await fetch(XUNHU_CONFIG.apiUrl, {
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -83,11 +94,14 @@ export async function POST(request: Request) {
 
         const data = await response.json();
 
-        if (data.openid || data.url || data.url_qrcode) {
-            return NextResponse.json({ url: data.url || data.url_qrcode });
+        console.log('[PAYMENT] Xunhu response:', data);
+
+        // 根据虎皮椒API文档，成功时 errcode=0, errmsg="success!"
+        if (data.errcode === 0 && data.errmsg === 'success!') {
+            return NextResponse.json({ url: data.url });
         } else {
             console.error('Xunhu Pay Error:', data);
-            return NextResponse.json({ error: data.msg || 'Payment initialization failed' }, { status: 500 });
+            return NextResponse.json({ error: data.errmsg || '支付初始化失败' }, { status: 500 });
         }
 
     } catch (err) {

@@ -1,6 +1,8 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
 
+export const dynamic = 'force-dynamic'
+
 // Initialize Admin Client
 const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -46,7 +48,7 @@ export async function POST(request: Request) {
             .from('user_credits')
             .insert({
                 user_id: user.id,
-                balance: 15, // New user gets 15 credits
+                balance: 10, // New user gets 10 credits (Daily Limit)
                 daily_generations: 0,
                 last_daily_reset: new Date().toISOString()
             })

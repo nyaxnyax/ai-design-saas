@@ -15,6 +15,7 @@ const envConfig = dotenv.parse(fs.readFileSync(envPath));
 
 const requiredKeys = [
     'NEXT_PUBLIC_SUPABASE_URL',
+    'NEXT_PUBLIC_SUPABASE_ANON_KEY',
     'SUPABASE_SERVICE_ROLE_KEY',
     'SMSBAO_USER',
     'SMSBAO_PASS'

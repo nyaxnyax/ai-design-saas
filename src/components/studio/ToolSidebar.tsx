@@ -229,7 +229,7 @@ export function ToolSidebar({ activeTool, setActiveTool, isGenerating, onGenerat
                 </button>
 
                 <p className="text-xs text-slate-600 text-center mt-3">
-                    使用 Nano Banana Pro 模型
+                    使用 Pika AI Pro 模型
                 </p>
             </div>
         </aside>

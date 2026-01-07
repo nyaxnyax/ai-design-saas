@@ -2,6 +2,8 @@ import { createClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
 import { SmsBaoClient } from '@/lib/smsbao'
 
+export const dynamic = 'force-dynamic'
+
 // Initialize Admin Client
 const supabaseAdmin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,

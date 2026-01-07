@@ -155,7 +155,7 @@ export default function Home() {
                   </div>
                 </div>
 
-                <Link href="/studio?mode=ecommerce">
+                <Link href="/ecommerce">
                   <button className="w-full btn-primary flex items-center justify-center gap-2 group/btn">
                     进入设计中心
                     <ArrowRight className="w-4 h-4 group-hover/btn:translate-x-1 transition-transform" />
@@ -191,7 +191,7 @@ export default function Home() {
               </div>
               <h3 className="text-xl font-semibold text-white mb-3">最强模型</h3>
               <p className="text-slate-400">
-                采用 Nano Banana Pro 顶级模型，效果远超市面廉价替代品
+                采用 Pika AI Pro 顶级模型，效果远超市面廉价替代品
               </p>
             </div>
             <div className="text-center">
@@ -274,7 +274,7 @@ export default function Home() {
                   </div>
                   <div>
                     <h3 className="font-semibold text-white">DesignAI Pro 效果</h3>
-                    <p className="text-xs text-slate-500">Nano Banana Pro 模型</p>
+                    <p className="text-xs text-slate-500">Pika AI Pro 模型</p>
                   </div>
                   <div className="ml-auto px-2 py-1 rounded-full bg-gradient-to-r from-indigo-500 to-purple-500 text-xs font-bold text-white">
                     Pro

@@ -11,11 +11,11 @@ export const BASE_COSTS = {
   upscale: 10,
 } as const;
 
-// Resolution multipliers (higher resolution = more credits)
+// Resolution multipliers (all resolutions cost the same - unified pricing)
 export const RESOLUTION_MULTIPLIERS: Record<Resolution, number> = {
   '1K': 1.0,
-  '2K': 2.0,
-  '4K': 4.0,
+  '2K': 1.0,
+  '4K': 1.0,
 };
 
 // Art style multiplier (some styles require more processing)
@@ -62,9 +62,7 @@ export function calculateCreditCost(
  * @returns A formatted string for display
  */
 export function getCreditDisplayText(cost: number): string {
-  if (cost <= 3) return `${cost} 积分`;
-  if (cost <= 10) return `${cost} 积分 (优质)`;
-  return `${cost} 积分 (高清)`;
+  return `${cost} 积分`;
 }
 
 /**

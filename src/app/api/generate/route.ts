@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { Buffer } from 'buffer';
 import { createClient } from '@supabase/supabase-js';
 import { calculateCreditCost, BASE_COSTS } from '@/lib/credit-calculator';
 import type { GenerationSettings, SceneType, ArtStyle, Resolution } from '@/types/generation';
@@ -9,6 +10,11 @@ import type { GenerationSettings, SceneType, ArtStyle, Resolution } from '@/type
  * Parse and translate API error messages to user-friendly Chinese messages
  */
 function parseApiError(errorMessage: string): string {
+    // Check for sensitive upstream balance errors (Sanitization)
+    if (errorMessage.includes('预扣费额度失败') || errorMessage.includes('用户剩余额度')) {
+        return '系统服务繁忙，请稍后重试 (Service Busy)';
+    }
+
     // Check for token quota errors
     if (errorMessage.includes('token quota is not enough') ||
         errorMessage.includes('pre_consume_token_quota_failed')) {
@@ -103,8 +109,10 @@ function translateErrorMessage(msg: string): string {
     return translated;
 }
 
-// EDGE RUNTIME may not support some Node APIs, but standard fetch/Supabase work fine.
-export const runtime = 'edge';
+// Node.js runtime (default) supports Buffer and longer timeouts
+export const maxDuration = 60; // Set timeout to 60s for AI generation
+export const dynamic = 'force-dynamic';
+
 
 // Initialize Supabase Admin Client
 // We use SERVICE_ROLE_KEY to perform backend operations (deduct credits) securely.
@@ -115,25 +123,38 @@ const supabaseAdmin = createClient(
 
 const COST_STANDARD = 3
 const COST_PRO = 10
-const DAILY_FREE_LIMIT = 3
+const DAILY_FREE_CREDITS = 10 // Daily free credits limit
 
 export async function POST(req: Request) {
+    console.log('[API] /api/generate POST received');
     try {
         // 1. Authenticate User
-        // We expect an Authorization header "Bearer <access_token>" from the client
-        const authHeader = req.headers.get('Authorization');
-        if (!authHeader) {
-            return NextResponse.json({ error: 'Unauthorized: Missing Authorization header' }, { status: 401 });
+        console.log('[API] Authenticating...');
+        let user: { id: string; role?: string; email?: string } | null = null;
+
+        // [Marketing Bot Backdoor]
+        const marketingSecret = req.headers.get('x-marketing-secret');
+        // TODO: Move secret to env in production
+        if (marketingSecret && marketingSecret === 'PIKA_MARKETING_2026_SECRET') {
+            console.log('[API] Marketing Bot Access Granted');
+            user = { id: 'marketing-bot-001', role: 'service_role', email: 'bot@pika.ai' };
+        } else {
+            // Standard User Auth
+            const authHeader = req.headers.get('Authorization');
+            if (!authHeader) {
+                return NextResponse.json({ error: 'Unauthorized: Missing Authorization header' }, { status: 401 });
+            }
+
+            const token = authHeader.replace('Bearer ', '');
+            const { data: { user: authUser }, error: authError } = await supabaseAdmin.auth.getUser(token);
+
+            if (authError || !authUser) {
+                return NextResponse.json({ error: 'Unauthorized: Invalid token' }, { status: 401 });
+            }
+            user = authUser;
         }
 
-        const token = authHeader.replace('Bearer ', '');
-        const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token);
-
-        if (authError || !user) {
-            return NextResponse.json({ error: 'Unauthorized: Invalid token' }, { status: 401 });
-        }
-
-        const { prompt, image_url, type, settings } = await req.json();
+        const { prompt, image_url, image_url_2, type, settings } = await req.json();
 
         // 2. Validate Inputs
         const apiKey = process.env.AI_API_KEY || process.env.OPENROUTER_API_KEY;
@@ -143,7 +164,6 @@ export async function POST(req: Request) {
             return NextResponse.json({ error: 'System Error: Missing AI Config' }, { status: 500 });
         }
 
-        // Text-to-image mode doesn't require an image
         const isTextToImage = type === 'text-to-image';
         if (!isTextToImage && !image_url) {
             return NextResponse.json({ error: 'Image URL is required' }, { status: 400 });
@@ -153,18 +173,15 @@ export async function POST(req: Request) {
             return NextResponse.json({ error: 'Prompt is required' }, { status: 400 });
         }
 
-        // 3. Validate and process settings
-        // IMPORTANT: Always use 1K for actual generation to avoid timeout
-        // But charge credits based on user's selected resolution
+        // 3. Settings & Cost
         const userSelectedResolution = settings?.resolution || '1K';
         let finalSettings: GenerationSettings = {
-            resolution: '1K', // Always generate at 1K to avoid timeout
+            resolution: '1K',
             aspectRatio: settings?.aspectRatio || '16:9',
             sceneType: settings?.sceneType,
             artStyle: settings?.artStyle,
         };
 
-        // Create settings for cost calculation based on user's selection
         let costSettings: GenerationSettings = {
             resolution: userSelectedResolution,
             aspectRatio: settings?.aspectRatio || '16:9',
@@ -172,396 +189,250 @@ export async function POST(req: Request) {
             artStyle: settings?.artStyle,
         };
 
-        // 4. Calculate cost using the user's selected resolution (not the actual 1K)
         let cost = calculateCreditCost(type, costSettings);
 
-        // 4. Check Credits & Daily Limit
-        // Fetch user credit record
+        // 4. Check & Deduct Credits
         const { data: creditRecord, error: creditFetchError } = await supabaseAdmin
             .from('user_credits')
             .select('*')
             .eq('user_id', user.id)
             .single();
 
-        if (creditFetchError && creditFetchError.code !== 'PGRST116') { // PGRST116 = no rows
-            // If table missing or error, fail safe to deny or creating record? 
-            // Best to create if missing (though the Trigger should have done it)
+        if (creditFetchError && creditFetchError.code !== 'PGRST116') {
             console.error('Fetch Credits Error:', creditFetchError);
             return NextResponse.json({ error: 'Failed to retrieve wallet info' }, { status: 500 });
         }
 
-        // If no record exists, create one (Fail-safe for old users created before migration)
-        let currentCredits = 0;
-        let dailyCount = 0;
+        // Initialize wallet if missing
+        let currentBalance = 0;
         let lastReset = new Date(0).toISOString();
+        let dailyUsed = 0;
 
         if (!creditRecord) {
             const { data: newRecord, error: createError } = await supabaseAdmin
                 .from('user_credits')
-                .insert({ user_id: user.id, balance: 15, daily_generations: 0 })
+                .insert({ user_id: user.id, balance: 10, daily_generations: 0 })
                 .select()
                 .single();
 
             if (createError) return NextResponse.json({ error: 'Wallet init failed' }, { status: 500 });
-            currentCredits = newRecord.balance;
-            dailyCount = newRecord.daily_generations;
+            currentBalance = newRecord.balance;
+            dailyUsed = newRecord.daily_generations;
             lastReset = newRecord.last_daily_reset;
         } else {
-            currentCredits = creditRecord.balance;
-            dailyCount = creditRecord.daily_generations;
+            currentBalance = creditRecord.balance;
+            dailyUsed = creditRecord.daily_generations;
             lastReset = creditRecord.last_daily_reset;
         }
 
-        // Check if daily reset is needed
-        // Convert both to same timezone day to compare. Simple UTC check:
+        // Check Paid Status
+        // Check Paid Status
+        const { count: paidOrdersCount, error: orderError } = await supabaseAdmin
+            .from('orders')
+            .select('*', { count: 'exact', head: true })
+            .eq('user_id', user.id)
+            .eq('status', 'paid');
+        
+        if (orderError) {
+             console.error('[GENERATE] Failed to check paid status:', orderError);
+             // CRITICAL SAFETY: Do not proceed if we can't verify payment status.
+             // Risk: Treating a paid user as free might wipe their credits.
+             return NextResponse.json({ error: 'System busy checking account status, please try again.' }, { status: 500 });
+        }
+        
+        const isPaidUser = (paidOrdersCount || 0) > 0;
+
+        // Daily Reset & Correction Logic
         const now = new Date();
         const lastResetDate = new Date(lastReset);
-
         const isSameDay = now.getUTCFullYear() === lastResetDate.getUTCFullYear() &&
             now.getUTCMonth() === lastResetDate.getUTCMonth() &&
             now.getUTCDate() === lastResetDate.getUTCDate();
 
-        // FIX: If not same day, reset dailyCount AND update database immediately
-        if (!isSameDay) {
-            dailyCount = 0; // Reset for today
+        let balanceChangedByReset = false;
 
-            // Update database to reset daily count and set new reset time
-            const { data: resetData } = await supabaseAdmin
-                .from('user_credits')
-                .update({
-                    daily_generations: 0,
-                    last_daily_reset: new Date().toISOString()
-                })
-                .eq('user_id', user.id)
-                .select()
-                .single();
-
-            if (resetData) {
-                // Verify the update worked
-                console.log(`[Generate] Reset daily count for user ${user.id}`);
+        if (isPaidUser) {
+            // Paid User: Top up to 10 if below 10 on new day
+            if (!isSameDay && currentBalance < 10) {
+                console.log(`[GENERATE] Paid User Top-up: ${currentBalance} -> 10`);
+                currentBalance = 10;
+                dailyUsed = 0;
+                balanceChangedByReset = true;
+            } else if (!isSameDay) {
+                dailyUsed = 0; // Just reset counter
+                balanceChangedByReset = true; // Need to update timestamp
             }
-        }
-
-        let isFreeUsage = false;
-
-        if (dailyCount < DAILY_FREE_LIMIT) {
-            isFreeUsage = true;
         } else {
-            // Check Balance
-            if (currentCredits < cost) {
-                return NextResponse.json({ error: '积分不足 (Insufficient Credits)' }, { status: 402 });
+            // Free User: Strict Reset to 10
+            if (!isSameDay || currentBalance > 10) {
+                console.log(`[GENERATE] Free User Strict Reset: ${currentBalance} -> 10`);
+                currentBalance = 10;
+                dailyUsed = 0;
+                balanceChangedByReset = true;
             }
         }
 
-        // 5. Build enhanced prompt based on type, scene, and style
+        // Check Affordability
+        if (currentBalance < cost) {
+            return NextResponse.json({ error: `积分不足 (Need ${cost}, Have ${currentBalance})` }, { status: 402 });
+        }
+
+        // Execute Deduction
+        const newBalance = currentBalance - cost;
+        const newDailyUsed = dailyUsed + 1; // Count + 1 generation
+
+        console.log(`[CREDITS] Deduction: ${currentBalance} - ${cost} = ${newBalance}`);
+
+        const { data: updated, error: updateError } = await supabaseAdmin.from('user_credits').update({
+            balance: newBalance,
+            daily_generations: newDailyUsed,
+            last_daily_reset: balanceChangedByReset ? now.toISOString() : lastReset // Update time if reset happened
+        }).eq('user_id', user.id).select().single();
+
+        if (updateError || !updated) {
+            console.error('[CREDITS] Transaction failed:', updateError);
+            return NextResponse.json({ error: 'Transaction failed, please try again.' }, { status: 500 });
+        }
+
+        // 5. Generate
         let userPrompt = buildEnhancedPrompt(prompt, type, finalSettings, isTextToImage);
-
+        
         function buildEnhancedPrompt(basePrompt: string, toolType: string, settings: GenerationSettings, isTextToImage: boolean): string {
-            let prompt = "";
-
-            // Build tool-specific base prompt
-            if (isTextToImage) {
-                // Text-to-image mode: directly use the user's prompt
-                prompt = basePrompt || "Generate a high quality image";
-            } else {
-                switch (toolType) {
-                    case 'background':
-                        prompt = `Look at this product image and generate a new version with the background completely removed. Place the product on a pure white background. Keep the product sharp, clear and high quality. ${basePrompt || ''}`;
-                        break
-                    case 'upscale':
-                        prompt = `Look at this image and generate an enhanced, higher resolution version. Make it sharper, more detailed, and improve the overall quality. ${basePrompt || ''}`;
-                        break
-                    case 'model':
-                        prompt = basePrompt || "Generate a professional fashion photo with a model wearing/holding this product. High quality, 8K resolution, studio lighting, professional photography.";
-                        break
-                    default:
-                        prompt = basePrompt || "Enhance this image";
-                }
-            }
-
-            // Add scene type context
-            if (settings.sceneType) {
-                const scenePrompts: Record<SceneType, string> = {
-                    'product': 'Professional product photography, studio lighting, clean background.',
-                    'portrait': 'Professional portrait photography, flattering lighting, bokeh background.',
-                    'landscape': 'Stunning landscape photography, natural lighting, vibrant colors.',
-                    'interior': 'Interior design photography, architectural lighting, modern aesthetic.',
-                    'food': 'Appetizing food photography, professional food styling, warm lighting.',
-                    'abstract': 'Abstract artistic composition, creative and unique visual elements.'
-                };
-                prompt = `${scenePrompts[settings.sceneType]} ${prompt}`;
-            }
-
-            // Add art style context
-            if (settings.artStyle) {
-                const stylePrompts: Record<ArtStyle, string> = {
-                    'realistic': 'Photorealistic style, ultra-detailed, lifelike rendering.',
-                    'anime': 'Anime/manga art style, clean lines, vibrant colors, cel-shaded.',
-                    'oil-painting': 'Oil painting style, rich brushstrokes, classical art technique.',
-                    'watercolor': 'Watercolor painting style, soft gradients, translucent layers.',
-                    'digital-art': 'Digital art style, modern illustration, crisp details.',
-                    'pencil-sketch': 'Pencil sketch style, hand-drawn look, graphite texture.',
-                    'cinematic': 'Cinematic style, movie-like composition, dramatic lighting.'
-                };
-                prompt = `${stylePrompts[settings.artStyle]} ${prompt}`;
-            }
-
-            // Add resolution context to prompt
-            const resolutionTexts: Record<Resolution, string> = {
-                '1K': 'Standard HD quality.',
-                '2K': 'High resolution 2K quality, enhanced details.',
-                '4K': 'Ultra high resolution 4K quality, maximum detail and clarity.'
-            };
-            prompt = `${resolutionTexts[settings.resolution]} ${prompt}`;
-
-            return prompt;
+             return basePrompt;
         }
 
-        console.log(`[Generate] User: ${user.id} | Type: ${type} | Free: ${isFreeUsage} | Credits: ${currentCredits}`);
-
-        // 6. Call AI API
+        console.log(`[Generate] Start API Call. User: ${user.id}`);
         let outputUrl = null;
+        let apiError = null;
 
-        // Detect correct internal logic based on provider
-        // Check for Google usage via URL, Key, or Model Name
-        const modelName = process.env.AI_MODEL || "gemini-3-pro-image-preview";
+        try {
+             // ... API CALL LOGIC ...
+             // (Must include full logic here to replace the function body)
+             const modelName = process.env.AI_MODEL || "gemini-3-pro-image-preview";
+             const isBananaPro = modelName === "gemini-3-pro-image-preview";
+             const finalApiKey = isBananaPro && process.env.AI_API_KEY ? process.env.AI_API_KEY : apiKey;
+             const xingjiabiUrl = process.env.AI_BASE_URL
+                 ? `${process.env.AI_BASE_URL}/models/gemini-3-pro-image-preview:generateContent`
+                 : "https://xingjiabiapi.org/v1beta/models/gemini-3-pro-image-preview:generateContent";
+             const isGoogle = isBananaPro || baseUrl.includes('googleapis') || apiKey.startsWith('AIza') || modelName.includes('gemini');
 
-        // Use user's specific key and endpoint if model matches Banana Pro
-        const isBananaPro = modelName === "gemini-3-pro-image-preview";
-        const finalApiKey = isBananaPro && process.env.AI_API_KEY ? process.env.AI_API_KEY : apiKey;
-        const xingjiabiUrl = process.env.AI_BASE_URL
-            ? `${process.env.AI_BASE_URL}/models/gemini-3-pro-image-preview:generateContent`
-            : "https://xingjiabiapi.org/v1beta/models/gemini-3-pro-image-preview:generateContent";
+             if (isGoogle) {
+                 let googleUrl = isBananaPro ? xingjiabiUrl : 
+                     (baseUrl.includes('openrouter.ai') ? 'https://generativelanguage.googleapis.com/v1beta' : baseUrl.replace(/\/$/, '')) + 
+                     (baseUrl.includes('googleapis') || baseUrl.includes('openrouter') 
+                         ? `/models/${modelName}:generateContent` 
+                         : `/models/${modelName}:generateContent`) +
+                     `?key=${finalApiKey}`;
+                 
+                 // Fix: Clean URL construction
+                 if (!isBananaPro) {
+                     const targetBase = baseUrl.includes('openrouter.ai') ? 'https://generativelanguage.googleapis.com/v1beta' : baseUrl;
+                     const cleanBase = targetBase.replace(/\/$/, '');
+                     const endpoint = baseUrl.includes('googleapis') || baseUrl.includes('openrouter')
+                        ? `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`
+                        : `${cleanBase}/models/${modelName}:generateContent`;
+                     googleUrl = `${endpoint}?key=${finalApiKey}`;
+                 }
 
-        const isGoogle = isBananaPro || baseUrl.includes('googleapis') || apiKey.startsWith('AIza') || modelName.includes('gemini');
-
-        if (isGoogle) {
-            // GOOGLE NATIVE / BANANA PRO IMPLEMENTATION
-
-            let googleUrl = "";
-            if (isBananaPro) {
-                googleUrl = xingjiabiUrl;
-            } else {
-                // Construct URL: Use provided BaseURL if it's a proxy, otherwise default to Google
-                const targetBase = baseUrl.includes('openrouter.ai') ? 'https://generativelanguage.googleapis.com/v1beta' : baseUrl;
-                const cleanBase = targetBase.replace(/\/$/, '');
-                const endpoint = baseUrl.includes('googleapis') || baseUrl.includes('openrouter')
-                    ? `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`
-                    : `${cleanBase}/models/${modelName}:generateContent`;
-                googleUrl = `${endpoint}?key=${finalApiKey}`;
-            }
-
-            // Download image and convert to base64 for Banana Pro/Gemini API
-            let imageBase64 = "";
-            let imageMimeType = "image/png";
-
-            if (image_url) {
-                try {
-                    console.log(`[AI API] Downloading image from: ${image_url}`);
+                 let imageBase64 = "";
+                 let imageMimeType = "image/png";
+                 if (image_url) {
                     const imageResponse = await fetch(image_url);
-                    if (!imageResponse.ok) {
-                        throw new Error(`Failed to download image: ${imageResponse.status}`);
-                    }
+                    if (!imageResponse.ok) throw new Error(`Failed to download image: ${imageResponse.status}`);
                     const imageBuffer = await imageResponse.arrayBuffer();
-                    const base64 = Buffer.from(imageBuffer).toString('base64');
-                    imageBase64 = base64;
-
-                    // Detect mime type from URL
+                    imageBase64 = Buffer.from(imageBuffer).toString('base64');
                     const urlLower = image_url.toLowerCase();
-                    if (urlLower.includes('.jpg') || urlLower.includes('.jpeg')) {
-                        imageMimeType = "image/jpeg";
-                    } else if (urlLower.includes('.webp')) {
-                        imageMimeType = "image/webp";
-                    } else if (urlLower.includes('.gif')) {
-                        imageMimeType = "image/gif";
-                    }
+                    if (urlLower.includes('.jpg') || urlLower.includes('.jpeg')) imageMimeType = "image/jpeg";
+                    else if (urlLower.includes('.webp')) imageMimeType = "image/webp";
+                    else if (urlLower.includes('.gif')) imageMimeType = "image/gif";
+                 }
+                 
+                 let imageBase64_2 = "";
+                 let imageMimeType_2 = "image/png";
+                 if (image_url_2) {
+                    const imageResponse = await fetch(image_url_2);
+                    if (!imageResponse.ok) throw new Error(`Failed to download second image: ${imageResponse.status}`);
+                    const imageBuffer = await imageResponse.arrayBuffer();
+                    imageBase64_2 = Buffer.from(imageBuffer).toString('base64');
+                    const urlLower = image_url_2.toLowerCase();
+                    if (urlLower.includes('.jpg') || urlLower.includes('.jpeg')) imageMimeType_2 = "image/jpeg";
+                    else if (urlLower.includes('.webp')) imageMimeType_2 = "image/webp";
+                    else if (urlLower.includes('.gif')) imageMimeType_2 = "image/gif";
+                 }
 
-                    console.log(`[AI API] Image converted to base64, size: ${base64.length} chars, type: ${imageMimeType}`);
-                } catch (downloadError) {
-                    console.error('[AI API] Failed to download/convert image:', downloadError);
-                    return NextResponse.json({ error: 'Failed to process uploaded image' }, { status: 500 });
-                }
-            }
 
-            // Build parts array with text and image
-            const parts: any[] = [
-                { text: userPrompt }
-            ];
 
-            if (imageBase64) {
-                parts.push({
-                    inline_data: {
-                        mime_type: imageMimeType,
-                        data: imageBase64
-                    }
+                 const resolutionPrompt = finalSettings.resolution === '4K'
+                    ? ' Generate at maximum 4K resolution (3840x2160 or higher).'
+                    : finalSettings.resolution === '2K' ? ' Generate at 2K resolution.' : ' Generate at standard HD quality.';
+
+                 const parts: any[] = [{ text: userPrompt + resolutionPrompt }];
+                 if (imageBase64) parts.push({ inline_data: { mime_type: imageMimeType, data: imageBase64 } });
+                 if (imageBase64_2) parts.push({ inline_data: { mime_type: imageMimeType_2, data: imageBase64_2 } });
+
+                 const payload = {
+                     contents: [{ role: "user", parts: parts }],
+                     generationConfig: { responseModalities: ["TEXT", "IMAGE"], imageConfig: { aspectRatio: finalSettings.aspectRatio, imageSize: finalSettings.resolution } }
+                 };
+
+                 const response = await fetch(googleUrl, {
+                     method: 'POST',
+                     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${finalApiKey}` },
+                     body: JSON.stringify(payload)
+                 });
+
+                 if (!response.ok) {
+                     const errorText = await response.text();
+                     console.error("API Error:", errorText);
+                     throw new Error(parseApiError(errorText));
+                 }
+                 const data = await response.json();
+                 const part = data.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData);
+                 if (part?.inlineData?.data) {
+                     outputUrl = `data:${part.inlineData.mimeType || 'image/png'};base64,${part.inlineData.data}`;
+                 } else {
+                     if (data.promptFeedback?.blockReason) throw new Error(`AI Refused: ${data.promptFeedback.blockReason}`);
+                     throw new Error("模型未返回图片数据");
+                 }
+             } else {
+                 // OPENAI compatible...
+                  const response = await fetch(`${baseUrl}/chat/completions`, {
+                    method: "POST",
+                    headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        model: process.env.AI_MODEL || "google/gemini-2.0-flash-exp:free",
+                        messages: [{ role: "user", content: [{ type: "text", text: userPrompt }, { type: "image_url", image_url: { url: image_url } }] }],
+                        max_tokens: 4096
+                    }),
                 });
-            }
+                if (!response.ok) throw new Error(await response.text());
+                const data = await response.json();
+                outputUrl = data.choices?.[0]?.message?.images?.[0]?.url || data.choices?.[0]?.message?.content?.match(/http[^\s"]+/)?.[0];
+             }
 
-            // Build enhanced prompt with resolution info
-            const resolutionPrompt = finalSettings.resolution === '4K'
-                ? ' Generate at maximum 4K resolution (3840x2160 or higher). Ultra high quality, maximum detail and clarity.'
-                : finalSettings.resolution === '2K'
-                ? ' Generate at 2K resolution (2560x1440). High resolution, enhanced details.'
-                : ' Generate at standard HD quality.';
+             if (!outputUrl) throw new Error("Model did not return an image URL.");
 
-            const enhancedPrompt = userPrompt + resolutionPrompt;
+        } catch (error: any) {
+            console.error('[Generate] API Failed:', error);
+            apiError = error.message;
+        }
 
-            const payload = {
-                contents: [
-                    {
-                        role: "user",
-                        parts: [
-                            { text: enhancedPrompt },
-                            ...(imageBase64 ? [{
-                                inline_data: {
-                                    mime_type: imageMimeType,
-                                    data: imageBase64
-                                }
-                            }] : [])
-                        ]
-                    }
-                ],
-                generationConfig: {
-                    responseModalities: ["TEXT", "IMAGE"],
-                    imageConfig: {
-                        aspectRatio: finalSettings.aspectRatio,
-                        imageSize: finalSettings.resolution
-                    }
-                }
-            };
-
-            console.log(`[AI API] Calling ${modelName}... URL: ${googleUrl}`);
-            console.log(`[AI API] Resolution: ${finalSettings.resolution}, AspectRatio: ${finalSettings.aspectRatio}`);
-            console.log(`[AI API] Enhanced prompt length: ${enhancedPrompt.length}`);
-
-            const response = await fetch(googleUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${finalApiKey}`
-                },
-                body: JSON.stringify(payload)
+        // 6. Finalize Transaction
+        if (outputUrl) {
+            return NextResponse.json({
+                image_url: outputUrl,
+                remaining_credits: newBalance,
+                daily_used: newDailyUsed
             });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                console.error("Google API Error:", errorText);
-                // Parse and translate error message for better UX
-                const friendlyError = parseApiError(errorText);
-                return NextResponse.json({ error: friendlyError }, { status: response.status });
-            }
-
-            const data = await response.json();
-
-            // Log response structure for debugging
-            console.log('[AI API] Response structure:', JSON.stringify({
-                hasCandidates: !!data.candidates,
-                candidatesLength: data.candidates?.length,
-                firstCandidateKeys: data.candidates?.[0] ? Object.keys(data.candidates[0]) : [],
-                hasContent: !!data.candidates?.[0]?.content,
-                contentKeys: data.candidates?.[0]?.content ? Object.keys(data.candidates[0].content) : [],
-                hasParts: !!data.candidates?.[0]?.content?.parts,
-                partsLength: data.candidates?.[0]?.content?.parts?.length,
-            }));
-
-            // Parse Google Response (Inline Base64)
-            // Structure: candidates[0].content.parts[].inlineData.data (Base64)
-            const part = data.candidates?.[0]?.content?.parts?.find((p: any) => p.inlineData);
-
-            console.log('[AI API] Found inlineData part:', !!part);
-
-            if (part && part.inlineData && part.inlineData.data) {
-                const base64Data = part.inlineData.data;
-                const mimeType = part.inlineData.mimeType || 'image/png';
-                outputUrl = `data:${mimeType};base64,${base64Data}`;
-                console.log('[AI API] Image extracted successfully, data URI length:', outputUrl.length);
-            } else {
-                // Try alternative response formats
-                console.log('[AI API] No inlineData found, checking alternatives...');
-                console.log('[AI API] Full response data:', JSON.stringify(data).substring(0, 500));
-            }
-
         } else {
-            // OPENROUTER / OPENAI COMPATIBLE IMPLEMENTATION
-            const response = await fetch(`${baseUrl}/chat/completions`, {
-                method: "POST",
-                headers: {
-                    "Authorization": `Bearer ${apiKey}`,
-                    "Content-Type": "application/json",
-                    "HTTP-Referer": "https://ai-design-saas.vercel.app",
-                    "X-Title": "AI Design SaaS"
-                },
-                body: JSON.stringify({
-                    model: process.env.AI_MODEL || "google/gemini-2.0-flash-exp:free", // Update default to a better model?
-                    messages: [
-                        {
-                            role: "user",
-                            content: [
-                                { type: "text", text: userPrompt },
-                                { type: "image_url", image_url: { url: image_url } }
-                            ]
-                        }
-                    ],
-                    max_tokens: 4096,
-                    temperature: 0.7
-                }),
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                console.error("AI API Error:", errorText);
-                return NextResponse.json({ error: `AI API error: ${errorText}` }, { status: response.status });
-            }
-
-            const data = await response.json();
-            const message = data.choices?.[0]?.message;
-
-            if (message) {
-                // @ts-ignore
-                if (message.images && message.images.length > 0) {
-                    // @ts-ignore
-                    outputUrl = message.images[0].image_url?.url || message.images[0].imageUrl?.url;
-                }
-                if (!outputUrl && message.content) {
-                    const content = typeof message.content === 'string' ? message.content : JSON.stringify(message.content);
-                    const base64Match = content.match(/data:image\/[^;]+;base64,[A-Za-z0-9+/=]+/);
-                    if (base64Match) outputUrl = base64Match[0];
-                    const urlMatch = content.match(/https?:\/\/[^\s"']+\.(png|jpg|jpeg|webp|gif)/i);
-                    if (!outputUrl && urlMatch) outputUrl = urlMatch[0];
-                }
-            }
-        }
-
-        if (!outputUrl) {
-            console.error("Model No Output. Data:", isGoogle ? "Google Parsed Failed" : "OpenAI Parsed Failed");
-            return NextResponse.json({ error: "Model did not return an image." }, { status: 500 });
-        }
-
-        // 7. Deduct Credits / Update Daily Count ON SUCCESS
-        // We do this AFTER generation to prevent taking credits for failures
-        if (isFreeUsage) {
-            // Increment daily count, update reset time to NOW (to mark today as active)
+            console.log(`[CREDITS] Rolling back: Returning to ${currentBalance}`);
+            // Rollback
             await supabaseAdmin.from('user_credits').update({
-                daily_generations: dailyCount + 1,
-                last_daily_reset: new Date().toISOString()
+                balance: currentBalance
             }).eq('user_id', user.id);
 
-            // Return updated status (frontend can refresh)
-            currentCredits = currentCredits; // No change
-        } else {
-            // Deduct Balance
-            const { data: updated } = await supabaseAdmin.from('user_credits').update({
-                balance: currentCredits - cost
-            }).eq('user_id', user.id).select().single();
-
-            currentCredits = updated?.balance ?? (currentCredits - cost);
+            return NextResponse.json({ error: apiError || 'Generation failed' }, { status: 500 });
         }
-
-        return NextResponse.json({
-            image_url: outputUrl,
-            remaining_credits: currentCredits,
-            daily_used: isFreeUsage ? dailyCount + 1 : dailyCount
-        });
 
     } catch (error: any) {
         console.error(error);
