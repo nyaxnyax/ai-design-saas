@@ -708,7 +708,7 @@ export default function EcommercePage() {
                                 <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-purple-500/10 border border-purple-500/20">
                                     <Zap className="w-4 h-4 text-purple-400" />
                                     <span className="text-sm text-white font-medium">{credits}</span>
-                                    <span className="text-xs text-slate-500">积分</span>
+                                    <span className="text-xs text-slate-500">可用积分</span>
                                 </div>
                             ) : (
                                 <button
