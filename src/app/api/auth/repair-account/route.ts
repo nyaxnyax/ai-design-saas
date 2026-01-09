@@ -1,5 +1,7 @@
 import { createClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
+
+export const dynamic = 'force-dynamic'
 import bcrypt from 'bcryptjs'
 
 // Initialize Admin Client

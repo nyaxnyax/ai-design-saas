@@ -7,7 +7,7 @@ import Image from 'next/image'
 import { 
     Upload, X, Download, ArrowRight, Zap, Sparkles, 
     ImageIcon, Palette, Users, Layers, Camera, 
-    ChevronDown, LogIn, Repeat, Loader2, Type, PenTool, Crop, Frame
+    ChevronDown, LogIn, Repeat, Loader2, Type, PenTool, Crop, Frame, Clock
 } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
 import { AuthModal } from '@/components/auth/AuthModal'
@@ -234,6 +234,17 @@ export default function EcommercePage() {
     const [generationStage, setGenerationStage] = useState('')
     const [error, setError] = useState<string | null>(null)
 
+    // 历史记录状态
+    interface HistoryItem {
+        id: string;
+        imageBase64: string;
+        prompt: string;
+        toolType: string;
+        createdAt: number;
+    }
+    const [historyImages, setHistoryImages] = useState<HistoryItem[]>([])
+    const [showHistoryPanel, setShowHistoryPanel] = useState(false)
+
     // 检查用户登录状态
     useEffect(() => {
         const checkUser = async () => {
@@ -288,6 +299,83 @@ export default function EcommercePage() {
     useEffect(() => {
         setSelectedStyle(null)
     }, [activeTool])
+
+    // IndexedDB 历史记录工具函数
+    const DB_NAME = 'PikaDesignHistory'
+    const STORE_NAME = 'generations'
+    const MAX_HISTORY = 50
+
+    const openDB = (): Promise<IDBDatabase> => {
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open(DB_NAME, 1)
+            request.onerror = () => reject(request.error)
+            request.onsuccess = () => resolve(request.result)
+            request.onupgradeneeded = (event) => {
+                const db = (event.target as IDBOpenDBRequest).result
+                if (!db.objectStoreNames.contains(STORE_NAME)) {
+                    db.createObjectStore(STORE_NAME, { keyPath: 'id' })
+                }
+            }
+        })
+    }
+
+    const saveToHistory = async (item: Omit<HistoryItem, 'id' | 'createdAt'>) => {
+        try {
+            const db = await openDB()
+            const tx = db.transaction(STORE_NAME, 'readwrite')
+            const store = tx.objectStore(STORE_NAME)
+            
+            const newItem: HistoryItem = {
+                ...item,
+                id: Date.now().toString(),
+                createdAt: Date.now()
+            }
+            store.add(newItem)
+            
+            // 限制历史数量
+            const allItems = await new Promise<HistoryItem[]>((resolve) => {
+                const allReq = store.getAll()
+                allReq.onsuccess = () => resolve(allReq.result)
+            })
+            
+            if (allItems.length > MAX_HISTORY) {
+                const toDelete = allItems.slice(0, allItems.length - MAX_HISTORY)
+                toDelete.forEach(item => store.delete(item.id))
+            }
+            
+            db.close()
+            loadHistoryFromDB()
+        } catch (err) {
+            console.error('Failed to save history:', err)
+        }
+    }
+
+    const loadHistoryFromDB = async () => {
+        try {
+            const db = await openDB()
+            const tx = db.transaction(STORE_NAME, 'readonly')
+            const store = tx.objectStore(STORE_NAME)
+            const allReq = store.getAll()
+            allReq.onsuccess = () => {
+                const items = (allReq.result as HistoryItem[]).sort((a, b) => b.createdAt - a.createdAt)
+                setHistoryImages(items)
+            }
+            db.close()
+        } catch (err) {
+            console.error('Failed to load history:', err)
+        }
+    }
+
+    // 页面加载时读取历史记录
+    useEffect(() => {
+        loadHistoryFromDB()
+    }, [])
+
+    // 使用历史图片作为样图
+    const handleUseAsReference = (imageBase64: string) => {
+        setUploadedImage(imageBase64)
+        setShowHistoryPanel(false)
+    }
 
     // 文件上传处理
     const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>, index: number = 0) => {
@@ -513,6 +601,13 @@ export default function EcommercePage() {
                         if (data.remaining_credits !== undefined) {
                             setCredits(data.remaining_credits)
                         }
+                        
+                        // 保存到历史记录
+                        saveToHistory({
+                            imageBase64: data.image_url,
+                            prompt: fullPrompt,
+                            toolType: activeTool
+                        })
                     }
                 } catch (err: any) {
                     console.error(`第 ${i+1} 张生成失败:`, err)
@@ -704,6 +799,21 @@ export default function EcommercePage() {
 
                         {/* 用户状态 */}
                         <div className="flex items-center gap-4">
+                            {/* 历史记录按钮 */}
+                            <button
+                                onClick={() => setShowHistoryPanel(true)}
+                                className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
+                                title="生成历史"
+                            >
+                                <Clock className="w-4 h-4" />
+                                <span className="text-sm hidden md:inline">历史记录</span>
+                                {historyImages.length > 0 && (
+                                    <span className="text-xs bg-purple-500/20 text-purple-400 px-1.5 py-0.5 rounded-full">
+                                        {historyImages.length}
+                                    </span>
+                                )}
+                            </button>
+                            
                             {user ? (
                                 <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-purple-500/10 border border-purple-500/20">
                                     <Zap className="w-4 h-4 text-purple-400" />
@@ -1168,6 +1278,88 @@ export default function EcommercePage() {
                                     <ArrowRight className="w-4 h-4 text-slate-600 group-hover:text-white transition-colors" />
                                 )}
                             </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* 历史记录侧边栏 */}
+            {showHistoryPanel && (
+                <div className="fixed inset-0 z-50">
+                    {/* 背景遮罩 */}
+                    <div 
+                        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+                        onClick={() => setShowHistoryPanel(false)}
+                    />
+                    
+                    {/* 侧边栏面板 */}
+                    <div className="absolute right-0 top-0 h-full w-[400px] max-w-full bg-[#0d0d14] border-l border-white/10 shadow-2xl flex flex-col animate-in slide-in-from-right">
+                        {/* 头部 */}
+                        <div className="p-6 border-b border-white/10">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="p-2 rounded-lg bg-purple-500/20">
+                                        <Clock className="w-5 h-5 text-purple-400" />
+                                    </div>
+                                    <div>
+                                        <h2 className="text-lg font-bold text-white">生成历史</h2>
+                                        <p className="text-xs text-slate-500">{historyImages.length} 张图片</p>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => setShowHistoryPanel(false)}
+                                    className="p-2 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white transition-colors"
+                                >
+                                    <X className="w-5 h-5" />
+                                </button>
+                            </div>
+                        </div>
+                        
+                        {/* 历史图片列表 */}
+                        <div className="flex-1 overflow-y-auto p-4">
+                            {historyImages.length === 0 ? (
+                                <div className="flex flex-col items-center justify-center h-full text-slate-500">
+                                    <ImageIcon className="w-16 h-16 mb-4 opacity-20" />
+                                    <p>暂无生成记录</p>
+                                    <p className="text-xs mt-1">生成的图片会自动保存在这里</p>
+                                </div>
+                            ) : (
+                                <div className="grid grid-cols-2 gap-3">
+                                    {historyImages.map((item) => (
+                                        <div 
+                                            key={item.id}
+                                            className="group relative rounded-xl overflow-hidden border border-white/10 hover:border-purple-500/50 transition-all"
+                                        >
+                                            <img 
+                                                src={item.imageBase64} 
+                                                alt="历史图片"
+                                                className="w-full aspect-square object-cover"
+                                            />
+                                            {/* 悬浮操作层 */}
+                                            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-3">
+                                                <div className="flex gap-2">
+                                                    <button
+                                                        onClick={() => handleUseAsReference(item.imageBase64)}
+                                                        className="flex-1 py-1.5 px-2 rounded-lg bg-purple-600 text-white text-xs font-medium hover:bg-purple-700 transition-colors"
+                                                    >
+                                                        作为样图
+                                                    </button>
+                                                    <button
+                                                        onClick={() => openDownloadModal(item.imageBase64)}
+                                                        className="py-1.5 px-2 rounded-lg bg-white/10 text-white hover:bg-white/20 transition-colors"
+                                                    >
+                                                        <Download className="w-4 h-4" />
+                                                    </button>
+                                                </div>
+                                            </div>
+                                            {/* 时间标签 */}
+                                            <div className="absolute top-2 left-2 text-[10px] bg-black/50 text-slate-300 px-1.5 py-0.5 rounded">
+                                                {new Date(item.createdAt).toLocaleDateString()}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
